@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Golden Qersh Coin rising from top of wallet -->
+    <path
+        android:fillColor="#E5C158"
+        android:pathData="M54,24 A13,13 0 1,1 53.9,24 Z" />
+    <path
+        android:fillColor="#0D4732"
+        android:pathData="M54,28 A9,9 0 1,1 53.9,28 Z" />
+    <path
+        android:fillColor="#E5C158"
+        android:pathData="M54,31 A6,6 0 1,1 53.9,31 Z" />
+
+    <!-- Main Wallet Body (Warm Cream / Gold Accent) -->
+    <path
+        android:fillColor="#FAF6EE"
+        android:pathData="M30,40 L76,40 C80.4,40 84,43.6 84,48 L84,74 C84,78.4 80.4,82 76,82 L30,82 C25.6,82 22,78.4 22,74 L22,48 C22,43.6 25.6,40 30,40 Z" />
+
+    <!-- Wallet Top Fold Shadow Accent -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M30,36 L72,36 C75.3,36 78,38.7 78,42 L26,42 C26,38.7 27.8,36 30,36 Z" />
+
+    <!-- Wallet Clasp (Deep Emerald + Gold Button) -->
+    <path
+        android:fillColor="#0D4732"
+        android:pathData="M64,53 L84,53 L84,69 L64,69 C59.6,69 56,65.4 56,61 C56,56.6 59.6,53 64,53 Z" />
+    <path
+        android:fillColor="#E5C158"
+        android:pathData="M64,57 A4,4 0 1,1 63.9,57 Z" />
+</vector>

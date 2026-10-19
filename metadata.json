@@ -1,0 +1,6 @@
+{
+  "name": "الصعيدي قرش",
+  "description": "تطبيق الصعيدي قرش (Saidi Qersh) لإدارة المصروفات والدخل والميزانية الشخصية وتحليل رسائل البنوك محليًا بخصوصية تامة.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
