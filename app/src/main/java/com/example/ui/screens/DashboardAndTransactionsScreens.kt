@@ -229,6 +229,11 @@ fun DashboardScreen(
             }
         }
 
+        // 2.5. بطاقة المستشار المالي الذكي ومؤشر الصرف اليومي الآمن (AI Financial Advisor & Safe Daily Spend)
+        item {
+            AiFinancialAdvisorAndSafeSpendCard(summary = summary)
+        }
+
         // 3. إشعار رسائل البنوك المعلقة للمراجعة إن وجدت
         if (summary.pendingSmsCount > 0 || summary.unclearSmsCount > 0) {
             item {
@@ -504,6 +509,114 @@ private fun QuickActionButton(
                 fontWeight = FontWeight.Bold,
                 maxLines = 1
             )
+        }
+    }
+}
+
+@Composable
+fun AiFinancialAdvisorAndSafeSpendCard(
+    summary: DashboardSummary,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("ai_financial_advisor_card"),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+        ),
+        border = BorderStroke(1.dp, SaidiGoldPrimary.copy(alpha = 0.45f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = SaidiGoldPrimary
+                    )
+                    Text(
+                        text = "المستشار المالي الذكي",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = SaidiGoldPrimary
+                ) {
+                    Text(
+                        text = "AI ✨",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF1F1705),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
+
+            // مؤشر الصرف اليومي الآمن
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("safe_daily_spend_box")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "حد الصرف اليومي الآمن",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "متبقي ${summary.remainingDaysInMonth} يوم في الشهر",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = "${MoneyUtils.formatMinor(summary.safeDailySpendMinor, summary.primaryCurrency)} / يوم",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = if (summary.safeDailySpendMinor > 0L) IncomeGreen else ExpenseRed,
+                        modifier = Modifier.testTag("safe_daily_spend_value")
+                    )
+                }
+            }
+
+            // التوصيات الذكية
+            summary.aiFinancialInsights.forEachIndexed { idx, insight ->
+                Text(
+                    text = insight,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = if (idx == 0) FontWeight.Bold else FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.testTag("ai_insight_item_$idx")
+                )
+            }
         }
     }
 }
@@ -1053,6 +1166,7 @@ fun TransactionFormDialog(
     accounts: List<AccountEntity>,
     categories: List<CategoryEntity>,
     obligations: List<ObligationEntity> = emptyList(),
+    merchantMemories: List<MerchantMemoryEntity> = emptyList(),
     onDismiss: () -> Unit,
     onSave: (
         existingId: Long,
@@ -1119,6 +1233,26 @@ fun TransactionFormDialog(
         )
     }
 
+    var matchedMerchantMemory by remember { mutableStateOf<MerchantMemoryEntity?>(null) }
+
+    val triggerSaveAction = {
+        onSave(
+            editingTransaction?.id ?: 0L,
+            selectedType,
+            amountText,
+            currency,
+            description,
+            editingTransaction?.notes ?: "",
+            selectedAccountId,
+            if (selectedType == TransactionType.TRANSFER) selectedToAccountId else null,
+            selectedCategoryId,
+            description.trim().ifBlank { editingTransaction?.merchantName ?: "" },
+            isMonthlyObligation,
+            if (isMonthlyObligation) selectedObligationId else null
+        )
+        onDismiss()
+    }
+
     val currencies = listOf("SAR", "EGP", "AED", "KWD", "USD")
 
     Dialog(
@@ -1140,21 +1274,44 @@ fun TransactionFormDialog(
             Column(
                 modifier = Modifier.fillMaxSize()
             ) {
-                // شريط علوي ثابت للإغلاق والعنوان
+                // شريط علوي ثابت للإغلاق والعنوان + زر علوي سريع (✓ حفظ)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
                         text = if (editingTransaction == null) "إضافة عملية مالية جديدة" else "تعديل العملية المالية",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
                     )
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "إغلاق")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        FilledTonalButton(
+                            onClick = triggerSaveAction,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .height(38.dp)
+                                .testTag("tx_form_top_save_btn")
+                        ) {
+                            Text(
+                                text = "✓ حفظ",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                        IconButton(
+                            onClick = onDismiss,
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "إغلاق")
+                        }
                     }
                 }
 
@@ -1349,18 +1506,81 @@ fun TransactionFormDialog(
                         }
                     }
 
-                    // 4. حقل الوصف: حقل نصي واحد نظيف بعنوان "الوصف"
+                    // 4. حقل الوصف + ذاكرة التاجر الذكية (Smart Merchant Memory)
                     OutlinedTextField(
                         value = description,
-                        onValueChange = { description = it },
-                        label = { Text("الوصف") },
-                        placeholder = { Text("مثلاً: كارفور، بنزين، دانكن... اختياري") },
+                        onValueChange = { newDesc ->
+                            description = newDesc
+                            val norm = BankSmsParserEngine.normalizeMerchantKey(newDesc)
+                            val foundMem = if (norm.length >= 2) {
+                                merchantMemories.firstOrNull { mem ->
+                                    mem.merchantKey.equals(norm, ignoreCase = true) ||
+                                        norm.contains(mem.merchantKey, ignoreCase = true)
+                                }
+                            } else null
+                            matchedMerchantMemory = foundMem
+                            if (foundMem != null) {
+                                foundMem.categoryId?.let { selectedCategoryId = it }
+                                foundMem.accountId?.let { accId ->
+                                    if (accounts.any { it.id == accId }) {
+                                        selectedAccountId = accId
+                                    }
+                                }
+                            }
+                        },
+                        label = { Text("الوصف / اسم التاجر") },
+                        placeholder = { Text("مثلاً: كارفور، بنزين، dani est، Tamara... اختياري") },
                         singleLine = true,
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("tx_form_desc_input")
                     )
+
+                    if (matchedMerchantMemory != null) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = SaidiGoldPrimary.copy(alpha = 0.18f),
+                            border = BorderStroke(1.dp, SaidiGoldPrimary.copy(alpha = 0.5f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("smart_merchant_memory_applied_badge")
+                        ) {
+                            Text(
+                                text = "🧠 ذاكرة التاجر الذكية: تم اختيار التصنيف والحساب تلقائياً لـ «${matchedMerchantMemory!!.displayName}»",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                            )
+                        }
+                    } else if (merchantMemories.isNotEmpty() && editingTransaction == null) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = "🧠 تجار محفوظون في ذاكرة التاجر الذكية (اضغط للتعبئة التلقائية):",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                items(merchantMemories.take(8), key = { it.merchantKey }) { mem ->
+                                    AssistChip(
+                                        onClick = {
+                                            description = mem.displayName
+                                            matchedMerchantMemory = mem
+                                            mem.categoryId?.let { selectedCategoryId = it }
+                                            mem.accountId?.let { accId ->
+                                                if (accounts.any { it.id == accId }) {
+                                                    selectedAccountId = accId
+                                                }
+                                            }
+                                        },
+                                        label = { Text(mem.displayName, style = MaterialTheme.typography.labelMedium) },
+                                        modifier = Modifier.testTag("merchant_memory_chip_${mem.merchantKey}")
+                                    )
+                                }
+                            }
+                        }
+                    }
 
                     // 5. اختيار الحساب باستخدام FlowRow مرن حتى لا تنضغط النصوص عمودياً أو تخرج عن البطاقة
                     if (accounts.isNotEmpty()) {
@@ -1439,33 +1659,19 @@ fun TransactionFormDialog(
                     Spacer(modifier = Modifier.height(12.dp))
                 }
 
-                // 7. شريط سفلي ثابت دائماً فوق شريط التنقلولوحة المفاتيح يحتوي على زر "حفظ العملية"
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                // 7. شريط سفلي ثابت دائماً (Sticky Footer) فوق شريط التنقل ولوحة المفاتيح يحتوي على زر "💾 احفظ العملية"
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 3.dp,
+                    tonalElevation = 6.dp,
+                    shadowElevation = 8.dp,
                     modifier = Modifier
                         .fillMaxWidth()
                         .navigationBarsPadding()
+                        .testTag("tx_form_sticky_footer")
                 ) {
                     Button(
-                        onClick = {
-                            onSave(
-                                editingTransaction?.id ?: 0L,
-                                selectedType,
-                                amountText,
-                                currency,
-                                description,
-                                editingTransaction?.notes ?: "",
-                                selectedAccountId,
-                                if (selectedType == TransactionType.TRANSFER) selectedToAccountId else null,
-                                selectedCategoryId,
-                                editingTransaction?.merchantName ?: "",
-                                isMonthlyObligation,
-                                if (isMonthlyObligation) selectedObligationId else null
-                            )
-                            onDismiss()
-                        },
+                        onClick = triggerSaveAction,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 10.dp)
@@ -1473,12 +1679,10 @@ fun TransactionFormDialog(
                             .testTag("tx_form_save_btn"),
                         shape = RoundedCornerShape(16.dp)
                     ) {
-                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(8.dp))
                         Text(
-                            text = "حفظ العملية",
+                            text = "💾 احفظ العملية",
                             style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.ExtraBold
                         )
                     }
                 }
@@ -1491,6 +1695,7 @@ fun TransactionFormDialog(
  * شبكة مربعات التصنيفات (Grid من 4 أعمدة):
  * - السماح لاسم التصنيف بالظهور على سطرين (maxLines = 2, textAlign = TextAlign.Center)
  * - حجم خط مناسب (11.sp) وحشوة داخلية متوازنة حتى يظهر الاسم كاملاً وواضحاً بدون أي اقتصاص (...) وتحت الأيقونة مباشرة.
+ * - تحسين ألوان نصوص التصنيفات المختارة في الوضع الليلي لتكون واضحة وبارزة (خط عريض ولون مضيء).
  */
 @Composable
 fun CategoryFourColumnGrid(
@@ -1499,6 +1704,12 @@ fun CategoryFourColumnGrid(
     onSelectCategory: (CategoryEntity) -> Unit
 ) {
     val rows = remember(categories) { categories.chunked(4) }
+    // التحقق من سطوع خلفية الثيم لمعرفة الوضع الليلي بدقة
+    val surfaceColor = MaterialTheme.colorScheme.surface
+    val isDarkSurface = remember(surfaceColor) {
+        (surfaceColor.red * 0.299f + surfaceColor.green * 0.587f + surfaceColor.blue * 0.114f) < 0.45f
+    }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -1511,15 +1722,20 @@ fun CategoryFourColumnGrid(
                 rowItems.forEach { cat ->
                     val isSelected = selectedCategoryId == cat.id
                     val accentColor = parseColorSafe(cat.colorHex, SaidiGreenPrimary)
-                    val bgColor = if (isSelected) {
-                        accentColor.copy(alpha = 0.16f)
-                    } else {
-                        MaterialTheme.colorScheme.surface
+                    val bgColor = when {
+                        isSelected && isDarkSurface -> SaidiGoldPrimary.copy(alpha = 0.24f)
+                        isSelected -> accentColor.copy(alpha = 0.18f)
+                        else -> MaterialTheme.colorScheme.surface
                     }
-                    val borderColor = if (isSelected) {
-                        accentColor
-                    } else {
-                        MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+                    val borderColor = when {
+                        isSelected && isDarkSurface -> SaidiGoldLight
+                        isSelected -> accentColor
+                        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+                    }
+                    val labelColor = when {
+                        isSelected && isDarkSurface -> Color(0xFFFFF59D) // لون ذهبي مضيء واضح جداً في الوضع الليلي
+                        isSelected -> accentColor
+                        else -> MaterialTheme.colorScheme.onSurface
                     }
 
                     Box(
@@ -1529,7 +1745,7 @@ fun CategoryFourColumnGrid(
                             .clip(RoundedCornerShape(14.dp))
                             .background(bgColor)
                             .border(
-                                width = if (isSelected) 2.dp else 1.dp,
+                                width = if (isSelected) 2.5.dp else 1.dp,
                                 color = borderColor,
                                 shape = RoundedCornerShape(14.dp)
                             )
@@ -1551,8 +1767,8 @@ fun CategoryFourColumnGrid(
                                 text = cat.nameAr,
                                 fontSize = 11.sp,
                                 lineHeight = 14.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                color = if (isSelected) accentColor else MaterialTheme.colorScheme.onSurface,
+                                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                color = labelColor,
                                 maxLines = 2,
                                 textAlign = TextAlign.Center
                             )

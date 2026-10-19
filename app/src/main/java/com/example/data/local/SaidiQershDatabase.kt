@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.example.domain.BankSmsParserEngine
 import com.example.domain.MoneyUtils
 
 @Database(
@@ -24,9 +25,11 @@ import com.example.domain.MoneyUtils
         SavingsMovementEntity::class,
         ShoppingListEntity::class,
         ShoppingItemEntity::class,
-        ImportAuditLogEntity::class
+        ImportAuditLogEntity::class,
+        IgnoredKeywordEntity::class,
+        MerchantMemoryEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 @TypeConverters(RoomTypeConverters::class)
@@ -43,6 +46,40 @@ abstract class SaidiQershDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `ignored_keywords` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `keyword` TEXT NOT NULL,
+                        `isActive` INTEGER NOT NULL DEFAULT 1,
+                        `isDefault` INTEGER NOT NULL DEFAULT 0,
+                        `createdAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_ignored_keywords_keyword` ON `ignored_keywords` (`keyword`)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `merchant_memories` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `normalizedMerchant` TEXT NOT NULL,
+                        `merchantDisplayName` TEXT NOT NULL,
+                        `categoryId` INTEGER,
+                        `categoryName` TEXT NOT NULL,
+                        `accountId` INTEGER,
+                        `accountName` TEXT NOT NULL,
+                        `usageCount` INTEGER NOT NULL DEFAULT 1,
+                        `updatedAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_merchant_memories_normalizedMerchant` ON `merchant_memories` (`normalizedMerchant`)")
+            }
+        }
+
         fun getInstance(context: Context): SaidiQershDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -50,7 +87,7 @@ abstract class SaidiQershDatabase : RoomDatabase() {
                     SaidiQershDatabase::class.java,
                     "saidi_qersh_local.db"
                 )
-                    .addMigrations(MIGRATION_2_3)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
                     .fallbackToDestructiveMigration(true)
                     .build()
                 INSTANCE = instance
@@ -60,7 +97,7 @@ abstract class SaidiQershDatabase : RoomDatabase() {
 
         /**
          * يجهز البيانات التأسيسية لجهات الرسائل المستقلة (Alinma, AlRajhi, Enjaz, Urpay, STC Pay, VF-Cash, Fawry, SNB, CIB, NBE...)
-         * والتصنيفات الـ 16 الجديدة والحسابات الافتراضية دون خلط بين الجهات.
+         * والتصنيفات الـ 16 الجديدة والحسابات الافتراضية وكلمات التجاهل المخصصة دون خلط بين الجهات.
          */
         suspend fun seedInitialDataIfEmpty(dao: SaidiQershDao) {
             val existingBanks = dao.getAllBanks()
@@ -247,6 +284,19 @@ abstract class SaidiQershDatabase : RoomDatabase() {
                         priority = 15
                     )
                 )
+            }
+
+            // تأسيس الكلمات الافتراضية في نظام كلمات التجاهل المخصصة للرسائل (Ignored Keywords Manager)
+            if (dao.getAllIgnoredKeywords().isEmpty()) {
+                for (kw in BankSmsParserEngine.AUTO_IGNORE_NON_FINANCIAL_KEYWORDS) {
+                    dao.insertIgnoredKeyword(
+                        IgnoredKeywordEntity(
+                            keyword = kw,
+                            isActive = true,
+                            isDefault = true
+                        )
+                    )
+                }
             }
 
             // شبكة التصنيفات الـ 16 المطلوبة مع أيقونات تعبيرية ملونة + تصنيفات الدخل

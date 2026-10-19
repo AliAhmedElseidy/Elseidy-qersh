@@ -112,6 +112,8 @@ fun SaidiQershAppRoot(
     val pinCode by viewModel.pinCode.collectAsStateWithLifecycle()
     val isUnlocked by viewModel.isAppUnlocked.collectAsStateWithLifecycle()
     val isDarkModePreferred by viewModel.isDarkModePreferred.collectAsStateWithLifecycle()
+    val ignoredKeywords by viewModel.ignoredKeywords.collectAsStateWithLifecycle()
+    val merchantMemories by viewModel.merchantMemories.collectAsStateWithLifecycle()
 
     var currentTab by remember { mutableStateOf(initialDestination) }
     var showSmartActionSheet by remember { mutableStateOf(false) }
@@ -399,7 +401,16 @@ fun SaidiQershAppRoot(
                                 },
                                 onLoadSandboxSamples = { viewModel.loadRealisticBankSamplesIntoSandbox() },
                                 onClearSandbox = { viewModel.clearSandboxSuggestions() },
-                                onScanDeviceInbox = { viewModel.scanPhoneSmsInbox(context) }
+                                onScanDeviceInbox = { viewModel.scanPhoneSmsInbox(context) },
+                                ignoredKeywords = ignoredKeywords,
+                                onAddIgnoredKeyword = { viewModel.addIgnoredKeyword(it) },
+                                onToggleIgnoredKeyword = { kw, en -> viewModel.toggleIgnoredKeyword(kw, en) },
+                                onDeleteIgnoredKeyword = { viewModel.deleteIgnoredKeyword(it) },
+                                merchantMemories = merchantMemories,
+                                onSaveMerchantMemory = { name, catId, accId ->
+                                    viewModel.saveMerchantMemory(name, catId, accId)
+                                },
+                                onDeleteMerchantMemory = { viewModel.deleteMerchantMemory(it) }
                             )
                         }
                         MainDestination.ACCOUNTS -> {
@@ -506,6 +517,7 @@ fun SaidiQershAppRoot(
             accounts = accounts,
             categories = categories,
             obligations = obligations,
+            merchantMemories = merchantMemories,
             onDismiss = {
                 showTransactionDialog = false
                 editingTransaction = null

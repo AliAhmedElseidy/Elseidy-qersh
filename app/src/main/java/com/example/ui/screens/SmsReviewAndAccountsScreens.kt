@@ -55,12 +55,21 @@ fun SmsReviewScreen(
     onLoadSandboxSamples: () -> Unit,
     onClearSandbox: () -> Unit,
     onScanDeviceInbox: () -> Unit,
+    ignoredKeywords: List<IgnoredKeywordEntity> = emptyList(),
+    onAddIgnoredKeyword: (String) -> Unit = {},
+    onToggleIgnoredKeyword: (IgnoredKeywordEntity, Boolean) -> Unit = { _, _ -> },
+    onDeleteIgnoredKeyword: (IgnoredKeywordEntity) -> Unit = {},
+    merchantMemories: List<MerchantMemoryEntity> = emptyList(),
+    onSaveMerchantMemory: (String, Long?, Long?) -> Unit = { _, _, _ -> },
+    onDeleteMerchantMemory: (MerchantMemoryEntity) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     var selectedSection by remember { mutableIntStateOf(0) } // 0 = Review Queue, 1 = Sender Rules & Control + Sandbox, 2 = History
     var editingSuggested by remember { mutableStateOf<SuggestedTransactionEntity?>(null) }
     var showPermissionExplanationDialog by remember { mutableStateOf(false) }
+    var showIgnoredKeywordsDialog by remember { mutableStateOf(false) }
+    var showMerchantMemoryDialog by remember { mutableStateOf(false) }
 
     val accMap = remember(accounts) { accounts.associateBy { it.id } }
     val monthArabicLabel = remember(selectedYearMonth) { MoneyUtils.formatYearMonthArabic(selectedYearMonth) }
@@ -162,32 +171,71 @@ fun SmsReviewScreen(
             }
         }
 
-        // شريط التبويبات الفرعية
+        // شريط التبويبات الفرعية وأزرار إعدادات كلمات التجاهل وذاكرة التاجر الذكية
         item {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                item {
-                    FilterChip(
-                        selected = selectedSection == 0,
-                        onClick = { selectedSection = 0 },
-                        label = { Text("الرسائل التي تحتاج مراجعة (${reviewQueueItems.size})") },
-                        modifier = Modifier.testTag("sms_pending_tab")
-                    )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item {
+                        FilterChip(
+                            selected = selectedSection == 0,
+                            onClick = { selectedSection = 0 },
+                            label = { Text("الرسائل التي تحتاج مراجعة (${reviewQueueItems.size})") },
+                            modifier = Modifier.testTag("sms_pending_tab")
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = selectedSection == 1,
+                            onClick = { selectedSection = 1 },
+                            label = { Text("إدارة جهات الرسائل المسموحة (${banks.size})") },
+                            modifier = Modifier.testTag("sms_rules_sandbox_tab")
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = selectedSection == 2,
+                            onClick = { selectedSection = 2 },
+                            label = { Text("سجل المراجعة (${reviewedItems.size})") },
+                            modifier = Modifier.testTag("sms_history_tab")
+                        )
+                    }
                 }
-                item {
-                    FilterChip(
-                        selected = selectedSection == 1,
-                        onClick = { selectedSection = 1 },
-                        label = { Text("إدارة جهات الرسائل المسموحة (${banks.size})") },
-                        modifier = Modifier.testTag("sms_rules_sandbox_tab")
-                    )
-                }
-                item {
-                    FilterChip(
-                        selected = selectedSection == 2,
-                        onClick = { selectedSection = 2 },
-                        label = { Text("سجل المراجعة (${reviewedItems.size})") },
-                        modifier = Modifier.testTag("sms_history_tab")
-                    )
+
+                // أزرار الوصول السريع لإدارة كلمات التجاهل وذاكرة التاجر الذكية
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { showIgnoredKeywordsDialog = true },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("open_ignored_keywords_btn"),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = "🚫 كلمات التجاهل (${ignoredKeywords.size})",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { showMerchantMemoryDialog = true },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("open_merchant_memory_btn"),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = "🧠 ذاكرة التاجر (${merchantMemories.size})",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                    }
                 }
             }
         }
@@ -226,6 +274,12 @@ fun SmsReviewScreen(
                     SmsSandboxAndBanksSection(
                         banks = banks,
                         smsRules = smsRules,
+                        ignoredKeywords = ignoredKeywords,
+                        onAddIgnoredKeyword = onAddIgnoredKeyword,
+                        onToggleIgnoredKeyword = onToggleIgnoredKeyword,
+                        onDeleteIgnoredKeyword = onDeleteIgnoredKeyword,
+                        onOpenIgnoredKeywordsModal = { showIgnoredKeywordsDialog = true },
+                        onOpenMerchantMemoryModal = { showMerchantMemoryDialog = true },
                         onToggleBankSms = onToggleBankSms,
                         onToggleBankAutoApprove = onToggleBankAutoApprove,
                         onAddCustomBank = onAddCustomBank,
@@ -350,6 +404,27 @@ fun SmsReviewScreen(
                 onEditSuggestedBeforeConfirm(target, amtText, merchant, catId, accId, sType)
                 editingSuggested = null
             }
+        )
+    }
+
+    if (showIgnoredKeywordsDialog) {
+        IgnoredKeywordsManagerDialog(
+            ignoredKeywords = ignoredKeywords,
+            onAddKeyword = onAddIgnoredKeyword,
+            onToggleKeyword = onToggleIgnoredKeyword,
+            onDeleteKeyword = onDeleteIgnoredKeyword,
+            onDismiss = { showIgnoredKeywordsDialog = false }
+        )
+    }
+
+    if (showMerchantMemoryDialog) {
+        MerchantMemoryManagerDialog(
+            merchantMemories = merchantMemories,
+            categories = categories,
+            accounts = accounts,
+            onSaveMemory = onSaveMerchantMemory,
+            onDeleteMemory = onDeleteMerchantMemory,
+            onDismiss = { showMerchantMemoryDialog = false }
         )
     }
 }
@@ -717,10 +792,17 @@ private fun EditSuggestedTransactionDialog(
  *   أ) مفتاح تفعيل (Toggle 1): "قراءة رسائل هذه الجهة" (مفعّل / معطّل) — إذا عطله المستخدم، يتجاهل التطبيق رسائل هذه الجهة تماماً.
  *   ب) مفتاح تفعيل منفصل (Toggle 2 - ميزة مستقلة): "اعتماد وتسجيل تلقائي فوري (Auto-Approve)" — إذا فعّله المستخدم، يقوم التطبيق عند وصول الرسالة باستخراج المبلغ وتسجيل العملية فوراً في الحساب المرتبط دون انتظار مراجعة يدوية.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SmsSandboxAndBanksSection(
     banks: List<BankEntity>,
     smsRules: List<SmsRuleEntity>,
+    ignoredKeywords: List<IgnoredKeywordEntity> = emptyList(),
+    onAddIgnoredKeyword: (String) -> Unit = {},
+    onToggleIgnoredKeyword: (IgnoredKeywordEntity, Boolean) -> Unit = { _, _ -> },
+    onDeleteIgnoredKeyword: (IgnoredKeywordEntity) -> Unit = {},
+    onOpenIgnoredKeywordsModal: () -> Unit = {},
+    onOpenMerchantMemoryModal: () -> Unit = {},
     onToggleBankSms: (BankEntity, Boolean) -> Unit,
     onToggleBankAutoApprove: (BankEntity, Boolean) -> Unit,
     onAddCustomBank: (String, String, String, String) -> Unit,
@@ -736,12 +818,109 @@ private fun SmsSandboxAndBanksSection(
     var newBankName by remember { mutableStateOf("") }
     var newBankSender by remember { mutableStateOf("") }
     var newBankCurrency by remember { mutableStateOf("SAR") }
+    var inlineKeywordInput by remember { mutableStateOf("") }
 
     var ruleName by remember { mutableStateOf("") }
     var rulePattern by remember { mutableStateOf("") }
     var ruleBankId by remember { mutableStateOf(banks.firstOrNull()?.id ?: 1L) }
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        // 0. نظام كلمات التجاهل المخصصة للرسائل (Ignored Keywords Manager) داخل إعدادات رسائل البنك
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("ignored_keywords_settings_card"),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "🚫 نظام كلمات التجاهل المخصصة للرسائل",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "أي رسالة تحتوي على إحدى هذه الكلمات المفعلة يتم استبعادها تلقائياً من محركات قراءة الرسائل.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(
+                        onClick = onOpenIgnoredKeywordsModal,
+                        modifier = Modifier.testTag("expand_ignored_keywords_dialog_btn")
+                    ) {
+                        Text("فتح النافذة")
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = inlineKeywordInput,
+                        onValueChange = { inlineKeywordInput = it },
+                        label = { Text("إضافة كلمة تجاهل جديدة") },
+                        placeholder = { Text("مثل: عرض خاص، عزيزي العميل...") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("inline_ignored_keyword_input")
+                    )
+                    Button(
+                        onClick = {
+                            if (inlineKeywordInput.isNotBlank()) {
+                                onAddIgnoredKeyword(inlineKeywordInput)
+                                inlineKeywordInput = ""
+                            }
+                        },
+                        modifier = Modifier.testTag("inline_add_ignored_keyword_btn")
+                    ) {
+                        Text("إضافة")
+                    }
+                }
+
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    ignoredKeywords.forEach { kw ->
+                        InputChip(
+                            selected = kw.isEnabled,
+                            onClick = { onToggleIgnoredKeyword(kw, !kw.isEnabled) },
+                            label = {
+                                Text(
+                                    text = if (kw.isEnabled) "✓ ${kw.keyword}" else "⏸ ${kw.keyword}",
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                            },
+                            trailingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "حذف الكلمة",
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .clickable { onDeleteIgnoredKeyword(kw) }
+                                        .testTag("delete_ignored_kw_${kw.id}")
+                                )
+                            },
+                            modifier = Modifier.testTag("ignored_kw_chip_${kw.keyword}")
+                        )
+                    }
+                }
+            }
+        }
+
         // 1. شاشة إدارة جهات الرسائل المسموحة (Sender Rules & Control)
         Card(
             modifier = Modifier
@@ -1312,3 +1491,287 @@ fun AccountsManagementScreen(
         )
     }
 }
+
+/**
+ * نافذة إدارة كلمات التجاهل المخصصة للرسائل (Ignored Keywords Manager):
+ * - عرض قائمة الكلمات الحالية في شكل شرائح (Chips) مع إمكانية حذف أو تفعيل/إيقاف كل كلمة.
+ * - حقل نصي علوي لإضافة كلمة جديدة (مثل: عرض خاص، عزيزي العميل...) لتتجاهلها محركات قراءة الرسائل تلقائياً.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun IgnoredKeywordsManagerDialog(
+    ignoredKeywords: List<IgnoredKeywordEntity>,
+    onAddKeyword: (String) -> Unit,
+    onToggleKeyword: (IgnoredKeywordEntity, Boolean) -> Unit,
+    onDeleteKeyword: (IgnoredKeywordEntity) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var newKeyword by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "🚫 إدارة كلمات التجاهل المخصصة",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "أضف أي كلمة دعائية أو تنبيهية (مثل: عرض خاص، عزيزي العميل، نقاط ولاء) ليقوم محرك قراءة الرسائل باستبعادها تلقائياً:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = newKeyword,
+                        onValueChange = { newKeyword = it },
+                        label = { Text("كلمة تجاهل جديدة") },
+                        placeholder = { Text("مثل: عرض خاص، عزيزي العميل...") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("ignored_keyword_input")
+                    )
+                    Button(
+                        onClick = {
+                            if (newKeyword.isNotBlank()) {
+                                onAddKeyword(newKeyword)
+                                newKeyword = ""
+                            }
+                        },
+                        modifier = Modifier.testTag("add_ignored_keyword_btn")
+                    ) {
+                        Text("إضافة")
+                    }
+                }
+
+                HorizontalDivider()
+
+                Text(
+                    text = "الكلمات الحالية (${ignoredKeywords.size}) — اضغط على الشريحة لتفعيل/إيقاف أو (✕) للحذف:",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+
+                if (ignoredKeywords.isEmpty()) {
+                    Text(
+                        text = "لا توجد كلمات تجاهل مضافة حالياً.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        ignoredKeywords.forEach { item ->
+                            InputChip(
+                                selected = item.isEnabled,
+                                onClick = { onToggleKeyword(item, !item.isEnabled) },
+                                label = {
+                                    Text(
+                                        text = if (item.isEnabled) "✓ ${item.keyword}" else "⏸ ${item.keyword}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = if (item.isEnabled) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                trailingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "حذف كلمة ${item.keyword}",
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .clickable { onDeleteKeyword(item) }
+                                            .testTag("modal_delete_kw_${item.id}")
+                                    )
+                                },
+                                modifier = Modifier.testTag("modal_kw_chip_${item.keyword}")
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("close_ignored_keywords_dialog_btn")
+            ) {
+                Text("إغلاق")
+            }
+        }
+    )
+}
+
+/**
+ * نافذة إدارة ذاكرة التاجر الذكية (Smart Merchant Memory Manager):
+ * - حفظ ربط أسماء التجار (مثل dani est, Tamara) بالتصنيف والحساب الذي اختاره المستخدم آخر مرة، وتطبيقه تلقائياً في المرات القادمة.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun MerchantMemoryManagerDialog(
+    merchantMemories: List<MerchantMemoryEntity>,
+    categories: List<CategoryEntity>,
+    accounts: List<AccountEntity>,
+    onSaveMemory: (String, Long?, Long?) -> Unit,
+    onDeleteMemory: (MerchantMemoryEntity) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var merchantInput by remember { mutableStateOf("") }
+    var selectedCategoryId by remember { mutableStateOf(categories.firstOrNull()?.id) }
+    var selectedAccountId by remember { mutableStateOf(accounts.firstOrNull()?.id) }
+
+    val catMap = remember(categories) { categories.associateBy { it.id } }
+    val accMap = remember(accounts) { accounts.associateBy { it.id } }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "🧠 ذاكرة التاجر الذكية",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "يحفظ التطبيق تلقائياً ربط اسم التاجر (مثل dani est، Tamara) بالتصنيف والحساب الذي اخترته آخر مرة ليطبقه تلقائياً في الرسائل والعمليات القادمة.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = merchantInput,
+                    onValueChange = { merchantInput = it },
+                    label = { Text("اسم التاجر (مثل: dani est أو Tamara)") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("merchant_memory_name_input")
+                )
+
+                Text("التصنيف المرتبط:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(categories, key = { it.id }) { cat ->
+                        FilterChip(
+                            selected = selectedCategoryId == cat.id,
+                            onClick = { selectedCategoryId = cat.id },
+                            label = { Text(cat.nameAr) }
+                        )
+                    }
+                }
+
+                Text("الحساب المرتبط:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(accounts, key = { it.id }) { acc ->
+                        FilterChip(
+                            selected = selectedAccountId == acc.id,
+                            onClick = { selectedAccountId = acc.id },
+                            label = { Text(acc.name) }
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        if (merchantInput.isNotBlank()) {
+                            onSaveMemory(merchantInput, selectedCategoryId, selectedAccountId)
+                            merchantInput = ""
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("save_merchant_memory_btn")
+                ) {
+                    Text("حفظ في ذاكرة التاجر")
+                }
+
+                HorizontalDivider()
+
+                Text(
+                    text = "التجار المحفوظون حالياً (${merchantMemories.size}):",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+
+                if (merchantMemories.isEmpty()) {
+                    Text(
+                        text = "لم يتم حفظ تجار بعد. سيتم التعلم تلقائياً مع كل عملية أو رسالة تؤكدها.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    merchantMemories.forEach { mem ->
+                        val catName = mem.categoryId?.let { catMap[it]?.nameAr } ?: "بدون تصنيف"
+                        val accName = mem.accountId?.let { accMap[it]?.name } ?: "تلقائي"
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("merchant_memory_row_${mem.merchantKey}")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = mem.displayName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "التصنيف: $catName • الحساب: $accName",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onDeleteMemory(mem) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "حذف التاجر من الذاكرة",
+                                        tint = ExpenseRed,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("إغلاق")
+            }
+        }
+    )
+}
+

@@ -11,6 +11,8 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
 
     val banksFlow: Flow<List<BankEntity>> = dao.observeBanks()
     val smsRulesFlow: Flow<List<SmsRuleEntity>> = dao.observeSmsRules()
+    val ignoredKeywordsFlow: Flow<List<IgnoredKeywordEntity>> = dao.observeIgnoredKeywords()
+    val merchantMemoriesFlow: Flow<List<MerchantMemoryEntity>> = dao.observeMerchantMemories()
     val accountsFlow: Flow<List<AccountEntity>> = dao.observeAccounts()
     val categoriesFlow: Flow<List<CategoryEntity>> = dao.observeCategories()
     val confirmedTransactionsFlow: Flow<List<TransactionEntity>> = dao.observeConfirmedTransactions()
@@ -37,6 +39,44 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
 
     suspend fun deleteConfirmedTransaction(txId: Long) {
         dao.deleteConfirmedTransaction(txId)
+    }
+
+    // ==================== كلمات التجاهل المخصصة (Ignored Keywords Manager) ====================
+    suspend fun addIgnoredKeyword(keyword: String): Long {
+        val clean = keyword.trim()
+        if (clean.isEmpty()) return -1L
+        return dao.insertIgnoredKeyword(
+            IgnoredKeywordEntity(
+                keyword = clean,
+                isActive = true,
+                isDefault = false
+            )
+        )
+    }
+
+    suspend fun toggleIgnoredKeyword(item: IgnoredKeywordEntity, isActive: Boolean) {
+        dao.updateIgnoredKeyword(item.copy(isActive = isActive))
+    }
+
+    suspend fun deleteIgnoredKeyword(item: IgnoredKeywordEntity) {
+        dao.deleteIgnoredKeyword(item)
+    }
+
+    // ==================== ذاكرة التاجر الذكية (Smart Merchant Memory) ====================
+    suspend fun saveMerchantMemory(
+        merchantName: String,
+        categoryId: Long?,
+        accountId: Long?
+    ) {
+        dao.upsertMerchantMemory(
+            merchantRaw = merchantName,
+            categoryId = categoryId,
+            accountId = accountId
+        )
+    }
+
+    suspend fun deleteMerchantMemory(item: MerchantMemoryEntity) {
+        dao.deleteMerchantMemory(item)
     }
 
     // ==================== الحسابات والبنوك ====================
@@ -129,6 +169,8 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
         val rules = dao.getActiveSmsRules()
         val categories = dao.getAllCategories()
         val accounts = dao.getAllAccounts()
+        val ignoredKeywords = dao.getAllIgnoredKeywords()
+        val merchantMemories = dao.getAllMerchantMemories()
 
         val parsed = BankSmsParserEngine.parseSms(
             senderAddress = senderAddress,
@@ -137,17 +179,19 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
             knownBanks = banks,
             customRules = rules,
             categories = categories,
-            accounts = accounts
+            accounts = accounts,
+            customIgnoredKeywords = ignoredKeywords,
+            merchantMemories = merchantMemories
         )
 
-        // الفلترة التلقائية للرسائل غير المالية (تفعيل مستفيد، OTP، تسجيل دخول، إشعار رصيد...)
+        // الفلترة التلقائية للرسائل غير المالية أو المطابقة لكلمات التجاهل المخصصة
         if (parsed.suggestedType == SmsSuggestedType.BALANCE_NOTICE_ONLY || parsed.reviewStatus == ReviewStatus.IGNORED) {
             dao.insertAuditLog(
                 ImportAuditLogEntity(
                     eventType = "SMS_BALANCE_NOTICE",
                     entityType = "SMS",
                     sourceDescription = parsed.bankName,
-                    details = "رسالة غير مالية / إشعار رصيد تم استبعاده تلقائياً: ${parsed.sanitizedSnippet}",
+                    details = "رسالة غير مالية / كلمة متجاهلة تم استبعادها تلقائياً: ${parsed.sanitizedSnippet}",
                     reviewStatus = ReviewStatus.IGNORED.name
                 )
             )
@@ -277,6 +321,14 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
                 status = if (newAmountMinor > 0L) ReviewStatus.PENDING else ReviewStatus.UNCLEAR
             )
         )
+        // حفظ اختيار المستخدم في ذاكرة التاجر الذكية (Smart Merchant Memory) ليُطبق تلقائياً في المرات القادمة
+        if (newMerchant.isNotBlank()) {
+            dao.upsertMerchantMemory(
+                merchantRaw = newMerchant,
+                categoryId = newCategoryId,
+                accountId = newAccountId
+            )
+        }
     }
 
     suspend fun ignoreSuggestedTransaction(suggested: SuggestedTransactionEntity) {

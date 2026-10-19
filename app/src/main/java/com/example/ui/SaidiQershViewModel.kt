@@ -12,6 +12,7 @@ import com.example.domain.VoiceExpenseProposal
 import com.example.receivers.BankSmsBroadcastReceiver
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.util.Calendar
 
 data class CategorySpendingSlice(
     val categoryId: Long?,
@@ -41,12 +42,24 @@ data class DashboardSummary(
     val netAccountsBalanceMinor: Long = 0L,
     val monthlyBudgetLimitMinor: Long = 8000_00L,
     val remainingBudgetMinor: Long = 8000_00L,
+    val dailySafeSpendLimitMinor: Long = 266_00L,
+    val daysRemainingInMonth: Int = 15,
+    val smartInsights: List<String> = emptyList(),
     val categoryBreakdown: List<CategorySpendingSlice> = emptyList(),
     val budgetAlerts: List<BudgetAlertItem> = emptyList(),
     val dueObligations: List<ObligationEntity> = emptyList(),
     val pendingSmsCount: Int = 0,
     val unclearSmsCount: Int = 0
-)
+) {
+    val safeDailySpendMinor: Long
+        get() = dailySafeSpendLimitMinor
+
+    val remainingDaysInMonth: Int
+        get() = daysRemainingInMonth
+
+    val aiFinancialInsights: List<String>
+        get() = smartInsights
+}
 
 data class TransactionFilterState(
     val searchQuery: String = "",
@@ -91,6 +104,12 @@ class SaidiQershViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val smsRules: StateFlow<List<SmsRuleEntity>> = repository.smsRulesFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val ignoredKeywords: StateFlow<List<IgnoredKeywordEntity>> = repository.ignoredKeywordsFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val merchantMemories: StateFlow<List<MerchantMemoryEntity>> = repository.merchantMemoriesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val accounts: StateFlow<List<AccountEntity>> = repository.accountsFlow
@@ -185,7 +204,7 @@ class SaidiQershViewModel(
             val matchesCategory = filter.selectedCategoryId == null || tx.categoryId == filter.selectedCategoryId
             val matchesMin = minMinor == null || tx.amountMinor >= minMinor
             val matchesMax = maxMinor == null || tx.amountMinor <= maxMinor
-            inMonth && matchesQuery && matchesType && matchesAccount && matchesCategory && matchesMin && matchesMax
+            inMonth && matchesQuery && matchesType && matchesAccount && matchesMax && matchesMin
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -197,7 +216,8 @@ class SaidiQershViewModel(
         obligations,
         monthlySuggestedTransactions,
         _selectedCurrency,
-        _selectedYearMonth
+        _selectedYearMonth,
+        merchantMemories
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val txs = values[0] as List<TransactionEntity>
@@ -213,6 +233,8 @@ class SaidiQershViewModel(
         val suggestedInMonth = values[5] as List<SuggestedTransactionEntity>
         val cur = values[6] as String
         val selectedYm = values[7] as String
+        @Suppress("UNCHECKED_CAST")
+        val memories = values[8] as List<MerchantMemoryEntity>
 
         val now = System.currentTimeMillis()
         val (todayStart, todayEnd) = MoneyUtils.todayRangeMillis(now)
@@ -237,6 +259,12 @@ class SaidiQershViewModel(
         val budgetLimit = totalBudgetObj?.limitMinor ?: 8000_00L
         val remainingBudget = budgetLimit - monthExpense
 
+        val cal = Calendar.getInstance()
+        val currentDay = cal.get(Calendar.DAY_OF_MONTH).coerceAtLeast(1)
+        val maxDay = cal.getActualMaximum(Calendar.DAY_OF_MONTH).coerceAtLeast(28)
+        val daysLeft = (maxDay - currentDay + 1).coerceAtLeast(1)
+        val dailySafeSpend = (remainingBudget.coerceAtLeast(0L)) / daysLeft
+
         val catMap = cats.associateBy { it.id }
         val expenseTxsThisMonth = monthTxs.filter {
             it.type == TransactionType.EXPENSE || it.type == TransactionType.OBLIGATION_PAYMENT
@@ -256,6 +284,22 @@ class SaidiQershViewModel(
                 )
             }
             .sortedByDescending { it.amountMinor }
+
+        val insights = mutableListOf<String>()
+        insights.add(
+            "الحد اليومي الآمن للصرف: ${MoneyUtils.formatMinor(dailySafeSpend, cur)} يومياً خلال الـ $daysLeft يوماً المتبقية من الشهر."
+        )
+        breakdown.firstOrNull()?.let { topSlice ->
+            val pctTop = (topSlice.percentage * 100).toInt()
+            insights.add(
+                "أعلى تصنيف استهلاكاً هذا الشهر هو «${topSlice.categoryName}» بنسبة $pctTop% (${MoneyUtils.formatMinor(topSlice.amountMinor, cur)})."
+            )
+        }
+        if (memories.isNotEmpty()) {
+            insights.add(
+                "ذاكرة التاجر الذكية تحفظ حالياً ${memories.size} تاجر (منها: ${memories.take(3).joinToString("، ") { it.merchantDisplayName }}) للربط التلقائي الفوري."
+            )
+        }
 
         val alerts = mutableListOf<BudgetAlertItem>()
         if (budgetLimit > 0L) {
@@ -308,6 +352,9 @@ class SaidiQershViewModel(
             netAccountsBalanceMinor = netBalance,
             monthlyBudgetLimitMinor = budgetLimit,
             remainingBudgetMinor = remainingBudget,
+            dailySafeSpendLimitMinor = dailySafeSpend,
+            daysRemainingInMonth = daysLeft,
+            smartInsights = insights,
             categoryBreakdown = breakdown,
             budgetAlerts = alerts,
             dueObligations = obls.filter { !it.isCompleted }.take(5),
@@ -357,6 +404,50 @@ class SaidiQershViewModel(
         return false
     }
 
+    // ==================== نظام كلمات التجاهل المخصصة (Ignored Keywords Manager) ====================
+    fun addIgnoredKeyword(keyword: String) {
+        val clean = keyword.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            repository.addIgnoredKeyword(clean)
+            showBanner("تمت إضافة الكلمة «$clean» لقائمة كلمات التجاهل التلقائي")
+        }
+    }
+
+    fun toggleIgnoredKeyword(item: IgnoredKeywordEntity, isActive: Boolean) {
+        viewModelScope.launch {
+            repository.toggleIgnoredKeyword(item, isActive)
+            showBanner(
+                if (isActive) "تم تفعيل تجاهل الرسائل المحتوية على «${item.keyword}»"
+                else "تم إيقاف تجاهل الكلمة «${item.keyword}»"
+            )
+        }
+    }
+
+    fun deleteIgnoredKeyword(item: IgnoredKeywordEntity) {
+        viewModelScope.launch {
+            repository.deleteIgnoredKeyword(item)
+            showBanner("تم حذف الكلمة «${item.keyword}» من قائمة التجاهل")
+        }
+    }
+
+    // ==================== ذاكرة التاجر الذكية (Smart Merchant Memory) ====================
+    fun saveMerchantMemory(merchantName: String, categoryId: Long?, accountId: Long?) {
+        val clean = merchantName.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            repository.saveMerchantMemory(clean, categoryId, accountId)
+            showBanner("تم حفظ التاجر «$clean» في ذاكرة التاجر الذكية")
+        }
+    }
+
+    fun deleteMerchantMemory(item: MerchantMemoryEntity) {
+        viewModelScope.launch {
+            repository.deleteMerchantMemory(item)
+            showBanner("تم حذف «${item.merchantDisplayName}» من ذاكرة التاجر الذكية")
+        }
+    }
+
     // ==================== العمليات المالية ====================
     fun saveTransaction(
         existingId: Long = 0L,
@@ -403,7 +494,7 @@ class SaidiQershViewModel(
                 categoryId = if (type == TransactionType.TRANSFER) null else categoryId,
                 bankId = acc?.bankId,
                 bankName = acc?.bankName ?: "",
-                merchantName = merchantName,
+                merchantName = merchantName.ifBlank { description.trim() },
                 source = source,
                 obligationId = linkedObligationId,
                 isMonthlyObligationPayment = isMonthlyObligation
@@ -420,7 +511,7 @@ class SaidiQershViewModel(
                         notes = finalDescription
                     )
                 }
-                showBanner("تم حفظ العملية وتحديث الأرصدة مباشرة")
+                showBanner("تم حفظ العملية وتحديث الأرصدة وذاكرة التاجر الذكية مباشرة")
             } else {
                 repository.updateConfirmedTransaction(tx)
                 showBanner("تم تعديل العملية وتحديث سجل التعديلات والأرصدة")
@@ -549,7 +640,7 @@ class SaidiQershViewModel(
             if (id != null && id > 0L) {
                 showBanner("تم تحليل الرسالة من المرسل «${sender.ifBlank { "Alinma" }}» بنجاح")
             } else {
-                showBanner("تم استبعاد الرسالة تلقائياً (الجهة معطّلة / رسالة غير مالية / OTP / مكررة)")
+                showBanner("تم استبعاد الرسالة تلقائياً (الجهة معطّلة / كلمة متجاهلة / OTP / مكررة)")
             }
         }
     }
@@ -558,6 +649,7 @@ class SaidiQershViewModel(
         viewModelScope.launch {
             val samples = listOf(
                 "Alinma" to "شراء عبر Samsung Wallet مبلغ: ريال سعودى 10 بطاقة مدى: *5650 حساب: *2000 من: dani est",
+                "Alinma" to "شراء عبر نقاط البيع مبلغ: ريال سعودي 250 بطاقة مدى: *5650 حساب: *2000 من: Tamara مرجع: TMR402",
                 "Enjaz" to "حوالة صادرة عبر إنجاز بمبلغ: 550.00 ريال سعودي المستفيد: محمد أحمد مرجع: ENJ99120",
                 "Urpay" to "شراء عبر محفظة Urpay بمبلغ: SAR 35.00 لدى: كافيه القهوة المختصة مرجع: URP4410",
                 "STC Pay" to "عملية شراء بطاقة STC Pay بمبلغ 120.00 ر.س لدى: صيدلية النهدي مرجع: STC8812",
@@ -621,7 +713,7 @@ class SaidiQershViewModel(
                 overrideNotes = overrideNotes
             )
             if (txId != null) {
-                showBanner("تمت إضافة العملية وتسجيلها وتحديث الأرصدة والميزانية بنجاح")
+                showBanner("تمت إضافة العملية وتسجيلها وتحديث الأرصدة وذاكرة التاجر الذكية بنجاح")
             } else {
                 showBanner("يرجى تحديد المبلغ أولاً قبل إضافة العملية")
             }
@@ -648,7 +740,7 @@ class SaidiQershViewModel(
                 newAccountId = accountId,
                 newType = type
             )
-            showBanner("تم تحديث بيانات العملية المقترحة، يمكنك الآن الضغط على «أضف»")
+            showBanner("تم تحديث بيانات العملية وحفظ ربط التاجر «$merchant» في الذاكرة الذكية")
         }
     }
 

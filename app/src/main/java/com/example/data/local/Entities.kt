@@ -377,3 +377,75 @@ data class ImportAuditLogEntity(
     val reviewStatus: String = "CONFIRMED",
     val timestamp: Long = System.currentTimeMillis()
 )
+
+/**
+ * 13. كيان كلمات التجاهل المخصصة للرسائل (Ignored Keywords Manager)
+ * يتيح للمستخدم إضافة أو تفعيل/إيقاف أو حذف كلمات لتتجاهلها محركات قراءة الرسائل تلقائياً.
+ */
+@Entity(
+    tableName = "ignored_keywords",
+    indices = [Index(value = ["keyword"], unique = true)]
+)
+data class IgnoredKeywordEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val keyword: String,
+    val isActive: Boolean = true,
+    val isDefault: Boolean = false,
+    val createdAt: Long = System.currentTimeMillis()
+) {
+    val isEnabled: Boolean
+        get() = isActive
+
+    constructor(
+        id: Long = 0,
+        keyword: String,
+        isEnabled: Boolean
+    ) : this(
+        id = id,
+        keyword = keyword,
+        isActive = isEnabled,
+        isDefault = false
+    )
+}
+
+/**
+ * 14. كيان ذاكرة التاجر الذكية (Smart Merchant Memory)
+ * يحفظ ربط أسماء التجار (مثل dani est, Tamara) بالتصنيف والحساب الذي اختاره المستخدم آخر مرة،
+ * ويطبقه تلقائياً في العمليات والرسائل القادمة.
+ */
+@Entity(
+    tableName = "merchant_memories",
+    indices = [Index(value = ["normalizedMerchant"], unique = true)]
+)
+data class MerchantMemoryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val normalizedMerchant: String,
+    val merchantDisplayName: String,
+    val categoryId: Long? = null,
+    val categoryName: String = "",
+    val accountId: Long? = null,
+    val accountName: String = "",
+    val usageCount: Int = 1,
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    val merchantKey: String
+        get() = normalizedMerchant
+
+    val displayName: String
+        get() = merchantDisplayName
+
+    constructor(
+        merchantKey: String,
+        displayName: String,
+        categoryId: Long? = null,
+        accountId: Long? = null
+    ) : this(
+        id = 0,
+        normalizedMerchant = merchantKey,
+        merchantDisplayName = displayName,
+        categoryId = categoryId,
+        accountId = accountId
+    )
+}
+
+

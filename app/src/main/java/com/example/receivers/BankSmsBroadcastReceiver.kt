@@ -200,6 +200,8 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
             val rules = dao.getActiveSmsRules()
             val categories = dao.getAllCategories()
             val accounts = dao.getAllAccounts()
+            val ignoredKeywords = dao.getAllIgnoredKeywords()
+            val merchantMemories = dao.getAllMerchantMemories()
 
             val parsed = BankSmsParserEngine.parseSms(
                 senderAddress = senderAddress,
@@ -208,7 +210,9 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 knownBanks = banks,
                 customRules = rules,
                 categories = categories,
-                accounts = accounts
+                accounts = accounts,
+                customIgnoredKeywords = ignoredKeywords,
+                merchantMemories = merchantMemories
             )
 
             // استبعاد الرسائل غير المالية (تفعيل مستفيد، OTP، تسجيل دخول، إشعار رصيد) تلقائياً

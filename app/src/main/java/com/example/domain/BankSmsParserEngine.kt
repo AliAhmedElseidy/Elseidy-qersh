@@ -3,6 +3,8 @@ package com.example.domain
 import com.example.data.local.AccountEntity
 import com.example.data.local.BankEntity
 import com.example.data.local.CategoryEntity
+import com.example.data.local.IgnoredKeywordEntity
+import com.example.data.local.MerchantMemoryEntity
 import com.example.data.local.ReviewStatus
 import com.example.data.local.SmsRuleEntity
 import com.example.data.local.SmsSuggestedType
@@ -34,8 +36,8 @@ data class ParsedSmsResult(
  * محرك محلي فعلي ومطور لتحليل رسائل البنوك والمحافظ (السعودية والمصرية):
  * 1. الاكتشاف الذكي للمرسل (Dynamic Sender ID Detection): يقرأ اسم المرسل الفعلي (Alinma, AlRajhi, Enjaz, Vodafone, VF-Cash, Urpay, STC Pay, CIB, NBE, Fawry...) دون نسبة الرسائل خطأً للراجحي أو الإنماء.
  * 2. يدعم العملة قبل الرقم أو بعده، وحرف الياء والألف المقصورة (ريال سعودي / ريال سعودى)، والأرقام الصحيحة أو العشرية.
- * 3. يفلتر تلقائيًا الرسائل غير المالية (تفعيل مستفيد، إضافة مستفيد، رمز التحقق، كود التفعيل، OTP، الرقم السري، تسجيل دخول).
- * 4. يستخرج آخر 4 أرقام من الحساب (*2000) أو البطاقة (*5650) ويربطها تلقائيًا بالحساب المسجل في التطبيق.
+ * 3. يفلتر تلقائيًا الرسائل غير المالية بناءً على الكلمات الافتراضية + كلمات التجاهل المخصصة للمستخدم (Ignored Keywords Manager).
+ * 4. يطبق ذاكرة التاجر الذكية (Smart Merchant Memory) لربط التاجر (مثل dani est, Tamara) بالتصنيف والحساب المختارين سابقاً تلقائياً.
  */
 object BankSmsParserEngine {
 
@@ -100,6 +102,23 @@ object BankSmsParserEngine {
         Regex("""(?:مرجع|رقم المرجع|رقم العملية|الرقم المرجعي|Ref|Reference|TxID|Auth)\s*(?:رقم)?\s*[:#\-]?\s*([A-Za-z0-9\-]{4,24})""", RegexOption.IGNORE_CASE)
     )
 
+    fun normalizeMerchantKey(merchant: String): String {
+        return merchant.trim().lowercase(Locale.ROOT).replace(Regex("\\s+"), " ")
+    }
+
+    fun findMerchantMemory(
+        merchantName: String,
+        memories: List<MerchantMemoryEntity>
+    ): MerchantMemoryEntity? {
+        if (merchantName.isBlank() || memories.isEmpty()) return null
+        val key = normalizeMerchantKey(merchantName)
+        return memories.firstOrNull { it.normalizedMerchant == key }
+            ?: memories.firstOrNull {
+                it.normalizedMerchant.length >= 3 &&
+                    (key.contains(it.normalizedMerchant) || it.normalizedMerchant.contains(key))
+            }
+    }
+
     fun parseSms(
         senderAddress: String,
         rawBody: String,
@@ -107,7 +126,9 @@ object BankSmsParserEngine {
         knownBanks: List<BankEntity> = emptyList(),
         customRules: List<SmsRuleEntity> = emptyList(),
         categories: List<CategoryEntity> = emptyList(),
-        accounts: List<AccountEntity> = emptyList()
+        accounts: List<AccountEntity> = emptyList(),
+        customIgnoredKeywords: List<IgnoredKeywordEntity> = emptyList(),
+        merchantMemories: List<MerchantMemoryEntity> = emptyList()
     ): ParsedSmsResult {
         val cleanSender = senderAddress.trim()
         val normalizedBody = MoneyUtils.normalizeDigits(rawBody)
@@ -149,8 +170,8 @@ object BankSmsParserEngine {
         val isAutoApproveEnabled = matchedBank?.autoApproveEnabled ?: false
         val defaultCurrency = inferDefaultCurrency(normalizedBody, matchedBank, cleanSender)
 
-        // 3. الفلترة التلقائية للرسائل غير المالية (Auto-Ignore Non-Financial SMS)
-        if (containsAutoIgnoreKeyword(normalizedBody) ||
+        // 3. الفلترة التلقائية للرسائل غير المالية أو المطابقة لكلمات التجاهل المخصصة (Ignored Keywords Manager)
+        if (containsAutoIgnoreKeyword(normalizedBody, customIgnoredKeywords) ||
             (PROMO_OR_NON_TX_PATTERNS.any { it.containsMatchIn(normalizedBody) } &&
                 !containsConfirmedFinancialActionVerb(normalizedBody))
         ) {
@@ -214,7 +235,14 @@ object BankSmsParserEngine {
         val referenceNumber = extractReferenceNumber(normalizedBody)
         val merchantName = extractMerchant(normalizedBody, detectedType)
 
-        // 8. إذا لم يمكن استخراج المبلغ أو نوع العملية بثقة -> قائمة غير واضحة (UNCLEAR)
+        // 8. البحث في ذاكرة التاجر الذكية (Smart Merchant Memory) لتطبيق التصنيف والحساب المختارين سابقاً
+        val rememberedMerchant = findMerchantMemory(merchantName, merchantMemories)
+        val rememberedAccount = rememberedMerchant?.accountId?.let { memAccId ->
+            accounts.firstOrNull { it.id == memAccId }
+        }
+        val finalMatchedAccount = rememberedAccount ?: smartMatchedAccount
+
+        // 9. إذا لم يمكن استخراج المبلغ أو نوع العملية بثقة -> قائمة غير واضحة (UNCLEAR)
         if (detectedType == SmsSuggestedType.UNCLEAR || amountMinor == null || amountMinor <= 0L) {
             return ParsedSmsResult(
                 messageHash = messageHash,
@@ -230,17 +258,22 @@ object BankSmsParserEngine {
                 referenceNumber = referenceNumber,
                 extractedAccountLast4 = extractedAccLast4,
                 extractedCardLast4 = extractedCardLast4,
-                matchedAccountId = smartMatchedAccount?.id,
-                suggestedCategoryId = null,
-                suggestedCategoryName = "أخرى",
+                matchedAccountId = finalMatchedAccount?.id,
+                suggestedCategoryId = rememberedMerchant?.categoryId,
+                suggestedCategoryName = rememberedMerchant?.categoryName?.ifBlank { "أخرى" } ?: "أخرى",
                 reviewStatus = ReviewStatus.UNCLEAR,
                 sanitizedSnippet = sanitizedSnippet,
                 smsTimestamp = smsTimestamp
             )
         }
 
-        // 9. اقتراح التصنيف المناسب بناءً على اسم التاجر ونوع العملية
-        val (catId, catName) = suggestCategory(merchantName, normalizedBody, detectedType, categories)
+        // 10. اقتراح التصنيف المناسب (الأولوية القصوى لذاكرة التاجر الذكية، ثم القواعد الذكية)
+        val (catId, catName) = if (rememberedMerchant?.categoryId != null) {
+            val matchedCat = categories.firstOrNull { it.id == rememberedMerchant.categoryId }
+            rememberedMerchant.categoryId to (matchedCat?.nameAr ?: rememberedMerchant.categoryName.ifBlank { "تسوق" })
+        } else {
+            suggestCategory(merchantName, normalizedBody, detectedType, categories)
+        }
 
         return ParsedSmsResult(
             messageHash = messageHash,
@@ -256,7 +289,7 @@ object BankSmsParserEngine {
             referenceNumber = referenceNumber,
             extractedAccountLast4 = extractedAccLast4,
             extractedCardLast4 = extractedCardLast4,
-            matchedAccountId = smartMatchedAccount?.id,
+            matchedAccountId = finalMatchedAccount?.id,
             suggestedCategoryId = catId,
             suggestedCategoryName = catName,
             reviewStatus = ReviewStatus.PENDING,
@@ -265,8 +298,28 @@ object BankSmsParserEngine {
         )
     }
 
-    fun containsAutoIgnoreKeyword(body: String): Boolean {
-        return AUTO_IGNORE_NON_FINANCIAL_KEYWORDS.any { keyword ->
+    fun containsAutoIgnoreKeyword(
+        body: String,
+        customIgnoredKeywords: List<IgnoredKeywordEntity> = emptyList()
+    ): Boolean {
+        val keywordsToEvaluate = if (customIgnoredKeywords.any { it.isDefault }) {
+            // إذا كانت القائمة محملة من قاعدة البيانات (تتضمن الكلمات الافتراضية والمخصصة)، نعتمد الكلمات المفعلة فيها فقط
+            customIgnoredKeywords.filter { it.isActive }.map { it.keyword.trim() }.filter { it.isNotEmpty() }
+        } else {
+            val disabledSet = customIgnoredKeywords
+                .filter { !it.isActive }
+                .map { it.keyword.trim().lowercase(Locale.ROOT) }
+                .toSet()
+            val activeCustom = customIgnoredKeywords
+                .filter { it.isActive }
+                .map { it.keyword.trim() }
+                .filter { it.isNotEmpty() }
+            (activeCustom + AUTO_IGNORE_NON_FINANCIAL_KEYWORDS.filter {
+                it.trim().lowercase(Locale.ROOT) !in disabledSet
+            }).distinct()
+        }
+
+        return keywordsToEvaluate.any { keyword ->
             if (keyword.equals("OTP", ignoreCase = true)) {
                 Regex("""\bOTP\b""", RegexOption.IGNORE_CASE).containsMatchIn(body)
             } else {
@@ -628,6 +681,7 @@ object BankSmsParserEngine {
         val text = "$merchantName $body".lowercase(Locale.ROOT)
         val targetName = when {
             type == SmsSuggestedType.DEPOSIT || type == SmsSuggestedType.INCOMING_TRANSFER -> "أخرى"
+            text.contains("tamara") || text.contains("تمارا") || text.contains("tabby") || text.contains("تابي") || text.contains("قسط") || text.contains("أقساط") -> "أقساط"
             type == SmsSuggestedType.BILL_PAYMENT || text.contains("كهرباء") || text.contains("مياه") || text.contains("stc") || text.contains("موبايلي") || text.contains("زين") || text.contains("فوري") || text.contains("fawry") -> "فواتير"
             text.contains("بنزين") || text.contains("وقود") || text.contains("الدريس") || text.contains("ساسكو") || text.contains("نفط") || text.contains("petromin") -> "بنزين"
             text.contains("أوبر") || text.contains("uber") || text.contains("كريم") || text.contains("قطار") || text.contains("تاكسي") -> "مواصلات"

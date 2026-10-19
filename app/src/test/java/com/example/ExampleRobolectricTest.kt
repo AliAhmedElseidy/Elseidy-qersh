@@ -151,4 +151,37 @@ class ExampleRobolectricTest {
         assertEquals(alinmaAccBefore.currentBalanceMinor - 75_00L, alinmaAccAfter.currentBalanceMinor)
         assertEquals(txCountBefore + 1, db.dao().getAllConfirmedTransactions().size)
     }
+
+    @Test
+    fun ignoredKeywordsAndSmartMerchantMemory_learnAndApplyAutomatically() = runBlocking {
+        // 1. إضافة كلمة تجاهل مخصصة ("عرض خاص") والتحقق من استبعاد الرسالة التي تحتويها تلقائياً
+        repository.addIgnoredKeyword("عرض خاص")
+        val ignoredPromoId = repository.ingestBankSms(
+            senderAddress = "Alinma",
+            rawBody = "عرض خاص لعملاء مصرف الإنماء استرداد نقدي عند الشراء بمبلغ: 200 ريال سعودي"
+        )
+        assertNull("SMS matching custom ignored keyword must be auto-ignored", ignoredPromoId)
+
+        // 2. حفظ التاجر Tamara في ذاكرة التاجر الذكية مع التصنيف والحساب المفضلين
+        val categories = db.dao().getAllCategories()
+        val shoppingCategory = categories.firstOrNull { it.nameAr.contains("تسوق") } ?: categories.first()
+        val rajhiAccount = db.dao().getAllAccounts().firstOrNull { it.name.contains("الراجحي") } ?: db.dao().getAllAccounts().first()
+
+        repository.saveMerchantMemory(
+            merchantName = "Tamara",
+            categoryId = shoppingCategory.id,
+            accountId = rajhiAccount.id
+        )
+
+        // 3. عند ورود رسالة جديدة من التاجر Tamara، يتم اختيار التصنيف والحساب تلقائياً من ذاكرة التاجر الذكية
+        val tamaraSmsId = repository.ingestBankSms(
+            senderAddress = "AlRajhi",
+            rawBody = "شراء عبر الإنترنت بمبلغ: 180.00 ريال سعودي لدى: Tamara مرجع: TMR881"
+        )
+        assertNotNull(tamaraSmsId)
+        val suggestedTamara = db.dao().getSuggestedById(tamaraSmsId!!)!!
+        assertEquals(shoppingCategory.id, suggestedTamara.suggestedCategoryId)
+        assertEquals(rajhiAccount.id, suggestedTamara.suggestedAccountId)
+    }
 }
+

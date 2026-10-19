@@ -9,6 +9,7 @@ import androidx.room.Transaction
 import androidx.room.Update
 import com.example.domain.MoneyUtils
 import kotlinx.coroutines.flow.Flow
+import java.util.Locale
 
 @Dao
 interface SaidiQershDao {
@@ -40,6 +41,98 @@ interface SaidiQershDao {
 
     @Delete
     suspend fun deleteSmsRule(rule: SmsRuleEntity)
+
+    // ==================== كلمات التجاهل المخصصة (Ignored Keywords Manager) ====================
+    @Query("SELECT * FROM ignored_keywords ORDER BY isDefault DESC, id ASC")
+    fun observeIgnoredKeywords(): Flow<List<IgnoredKeywordEntity>>
+
+    @Query("SELECT * FROM ignored_keywords ORDER BY isDefault DESC, id ASC")
+    suspend fun getAllIgnoredKeywords(): List<IgnoredKeywordEntity>
+
+    @Query("SELECT * FROM ignored_keywords WHERE isActive = 1 ORDER BY id ASC")
+    suspend fun getActiveIgnoredKeywords(): List<IgnoredKeywordEntity>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIgnoredKeyword(item: IgnoredKeywordEntity): Long
+
+    @Update
+    suspend fun updateIgnoredKeyword(item: IgnoredKeywordEntity)
+
+    @Delete
+    suspend fun deleteIgnoredKeyword(item: IgnoredKeywordEntity)
+
+    @Query("DELETE FROM ignored_keywords")
+    suspend fun deleteAllIgnoredKeywords()
+
+    // ==================== ذاكرة التاجر الذكية (Smart Merchant Memory) ====================
+    @Query("SELECT * FROM merchant_memories ORDER BY updatedAt DESC, usageCount DESC")
+    fun observeMerchantMemories(): Flow<List<MerchantMemoryEntity>>
+
+    @Query("SELECT * FROM merchant_memories ORDER BY updatedAt DESC, usageCount DESC")
+    suspend fun getAllMerchantMemories(): List<MerchantMemoryEntity>
+
+    @Query("SELECT * FROM merchant_memories WHERE normalizedMerchant = :normalized LIMIT 1")
+    suspend fun getMerchantMemoryByNormalized(normalized: String): MerchantMemoryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMerchantMemory(item: MerchantMemoryEntity): Long
+
+    @Update
+    suspend fun updateMerchantMemory(item: MerchantMemoryEntity)
+
+    @Delete
+    suspend fun deleteMerchantMemory(item: MerchantMemoryEntity)
+
+    @Query("DELETE FROM merchant_memories")
+    suspend fun deleteAllMerchantMemories()
+
+    /**
+     * يحفظ أو يحدث ذاكرة التاجر الذكية تلقائياً عند اختيار المستخدم للتصنيف والحساب لتاجر معين.
+     */
+    suspend fun upsertMerchantMemory(
+        merchantRaw: String,
+        categoryId: Long?,
+        accountId: Long?
+    ) {
+        val cleaned = merchantRaw.trim()
+        if (cleaned.length < 2) return
+        val normalized = cleaned.lowercase(Locale.ROOT).replace(Regex("\\s+"), " ")
+        if (normalized in setOf("مصروف", "دخل", "شراء بالبطاقة", "سحب نقدي", "تحويل صادر", "تحويل وارد", "إيداع", "دفع فاتورة")) {
+            return
+        }
+
+        val existing = getMerchantMemoryByNormalized(normalized)
+        val catName = categoryId?.let { getCategoryById(it)?.nameAr } ?: existing?.categoryName ?: ""
+        val accName = accountId?.let { getAccountById(it)?.name } ?: existing?.accountName ?: ""
+        val now = System.currentTimeMillis()
+
+        if (existing != null) {
+            updateMerchantMemory(
+                existing.copy(
+                    merchantDisplayName = cleaned,
+                    categoryId = categoryId ?: existing.categoryId,
+                    categoryName = if (catName.isNotBlank()) catName else existing.categoryName,
+                    accountId = accountId ?: existing.accountId,
+                    accountName = if (accName.isNotBlank()) accName else existing.accountName,
+                    usageCount = existing.usageCount + 1,
+                    updatedAt = now
+                )
+            )
+        } else {
+            insertMerchantMemory(
+                MerchantMemoryEntity(
+                    normalizedMerchant = normalized,
+                    merchantDisplayName = cleaned,
+                    categoryId = categoryId,
+                    categoryName = catName,
+                    accountId = accountId,
+                    accountName = accName,
+                    usageCount = 1,
+                    updatedAt = now
+                )
+            )
+        }
+    }
 
     // ==================== الحسابات المالية ====================
     @Query("SELECT * FROM accounts ORDER BY id ASC")
@@ -134,12 +227,20 @@ interface SaidiQershDao {
     }
 
     /**
-     * إضافة عملية مؤكدة وتحديث أرصدة الحسابات وسجل التدقيق في معاملة قاعدة بيانات واحدة.
+     * إضافة عملية مؤكدة وتحديث أرصدة الحسابات وذاكرة التاجر الذكية وسجل التدقيق في معاملة قاعدة بيانات واحدة.
      */
     @Transaction
     suspend fun addConfirmedTransaction(tx: TransactionEntity): Long {
         val id = insertTransactionInternal(tx)
         applyTransactionBalanceDelta(tx.copy(id = id), reverse = false)
+        val merchantCandidate = tx.merchantName.ifBlank { tx.description }
+        if (tx.type != TransactionType.TRANSFER && merchantCandidate.isNotBlank()) {
+            upsertMerchantMemory(
+                merchantRaw = merchantCandidate,
+                categoryId = tx.categoryId,
+                accountId = tx.accountId
+            )
+        }
         insertAuditLog(
             ImportAuditLogEntity(
                 eventType = "TRANSACTION_ADD",
@@ -155,7 +256,7 @@ interface SaidiQershDao {
     }
 
     /**
-     * تعديل عملية مؤكدة مع عكس أثر الرصيد القديم وتطبيق الأثر الجديد وحفظ سجل التعديل.
+     * تعديل عملية مؤكدة مع عكس أثر الرصيد القديم وتطبيق الأثر الجديد وتحديث ذاكرة التاجر الذكية وحفظ سجل التعديل.
      */
     @Transaction
     suspend fun updateConfirmedTransaction(updatedTx: TransactionEntity) {
@@ -165,6 +266,14 @@ interface SaidiQershDao {
         val finalTx = updatedTx.copy(updatedAt = now)
         updateTransactionInternal(finalTx)
         applyTransactionBalanceDelta(finalTx, reverse = false)
+        val merchantCandidate = finalTx.merchantName.ifBlank { finalTx.description }
+        if (finalTx.type != TransactionType.TRANSFER && merchantCandidate.isNotBlank()) {
+            upsertMerchantMemory(
+                merchantRaw = merchantCandidate,
+                categoryId = finalTx.categoryId,
+                accountId = finalTx.accountId
+            )
+        }
         insertAuditLog(
             ImportAuditLogEntity(
                 eventType = "TRANSACTION_EDIT",
@@ -251,6 +360,7 @@ interface SaidiQershDao {
      * معاملة قاعدة بيانات واحدة (Atomic Transaction) عند ضغط المستخدم على «تأكيد وتسجيل»:
      * - تتحقق أن المقترح لم يُؤكد سابقًا لمنع المضاعفة.
      * - تنشئ العملية المؤكدة وتحدث رصيد الحساب مرة واحدة فقط.
+     * - تحفظ ربط التاجر بالتصنيف والحساب في ذاكرة التاجر الذكية (Smart Merchant Memory).
      * - تحدث حالة المقترح إلى CONFIRMED وتوثق سجل الاستيراد.
      */
     @Transaction
@@ -272,9 +382,14 @@ interface SaidiQershDao {
         val amountMinor = overrideAmountMinor ?: suggested.extractedAmountMinor ?: return null
         if (amountMinor <= 0L) return null
 
+        val merchant = (overrideMerchant ?: suggested.merchantName).ifBlank { suggested.suggestedType.titleAr }
+        val normalizedMerchant = merchant.trim().lowercase(Locale.ROOT).replace(Regex("\\s+"), " ")
+        val memory = getMerchantMemoryByNormalized(normalizedMerchant)
+
         val accounts = getAllAccounts()
         val chosenAccountId = overrideAccountId
             ?: suggested.suggestedAccountId
+            ?: memory?.accountId?.takeIf { memAccId -> accounts.any { it.id == memAccId } }
             ?: accounts.firstOrNull { it.bankId == suggested.bankId }?.id
             ?: accounts.firstOrNull()?.id
             ?: return null
@@ -292,8 +407,7 @@ interface SaidiQershDao {
             SmsSuggestedType.UNCLEAR -> TransactionType.EXPENSE
         }
 
-        val merchant = (overrideMerchant ?: suggested.merchantName).ifBlank { suggested.suggestedType.titleAr }
-        val categoryId = overrideCategoryId ?: suggested.suggestedCategoryId
+        val categoryId = overrideCategoryId ?: memory?.categoryId ?: suggested.suggestedCategoryId
         val now = System.currentTimeMillis()
 
         val confirmedTx = TransactionEntity(
@@ -317,6 +431,14 @@ interface SaidiQershDao {
 
         val confirmedId = insertTransactionInternal(confirmedTx)
         applyTransactionBalanceDelta(confirmedTx.copy(id = confirmedId), reverse = false)
+
+        if (merchant.isNotBlank()) {
+            upsertMerchantMemory(
+                merchantRaw = merchant,
+                categoryId = categoryId,
+                accountId = chosenAccountId
+            )
+        }
 
         updateSuggestedTransaction(
             suggested.copy(
@@ -644,6 +766,8 @@ interface SaidiQershDao {
         deleteAllShoppingItems()
         deleteAllShoppingLists()
         deleteAllAccounts()
+        deleteAllMerchantMemories()
+        deleteAllIgnoredKeywords()
         deleteAllAuditLogs()
     }
 }

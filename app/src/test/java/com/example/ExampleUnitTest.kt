@@ -226,4 +226,60 @@ class ExampleUnitTest {
         assertEquals("SAR", proposal.currency)
         assertEquals(12L, proposal.suggestedCategoryId)
     }
+
+    @Test
+    fun parseSms_customIgnoredKeywords_respectsEnabledAndDisabledKeywords() {
+        val promoSms = "عرض خاص لعملاء البطاقة الذهبية خصم 50 ريال لدى المتاجر المشاركة"
+        val customKeywordsActive = listOf(
+            IgnoredKeywordEntity(id = 1, keyword = "عرض خاص", isEnabled = true)
+        )
+        val parsedIgnored = BankSmsParserEngine.parseSms(
+            senderAddress = "Alinma",
+            rawBody = promoSms,
+            knownBanks = emptyList(),
+            categories = emptyList(),
+            customIgnoredKeywords = customKeywordsActive
+        )
+        assertEquals(ReviewStatus.IGNORED, parsedIgnored.reviewStatus)
+
+        val customKeywordsDisabled = listOf(
+            IgnoredKeywordEntity(id = 1, keyword = "عرض خاص", isEnabled = false)
+        )
+        assertFalse(BankSmsParserEngine.containsAutoIgnoreKeyword(promoSms, customKeywordsDisabled))
+    }
+
+    @Test
+    fun parseSms_smartMerchantMemory_autoAppliesSavedCategoryAndAccount() {
+        val sms = "شراء عبر Samsung Wallet مبلغ: ريال سعودى 45 بطاقة مدى: *5650 من: dani est"
+        val categories = listOf(
+            CategoryEntity(id = 1, nameAr = "أكل بره", type = CategoryType.EXPENSE, iconName = "🍔", colorHex = "#0D4732"),
+            CategoryEntity(id = 2, nameAr = "بقالة", type = CategoryType.EXPENSE, iconName = "🛒", colorHex = "#2E7D32")
+        )
+        val accounts = listOf(
+            AccountEntity(id = 10, name = "حساب الإنماء", type = AccountType.BANK, currency = "SAR", openingBalanceMinor = 0, currentBalanceMinor = 500000),
+            AccountEntity(id = 20, name = "حساب الراجحي", type = AccountType.BANK, currency = "SAR", openingBalanceMinor = 0, currentBalanceMinor = 300000)
+        )
+        val memories = listOf(
+            MerchantMemoryEntity(
+                merchantKey = "dani est",
+                displayName = "dani est",
+                categoryId = 2L,
+                accountId = 20L
+            )
+        )
+        val parsed = BankSmsParserEngine.parseSms(
+            senderAddress = "Alinma",
+            rawBody = sms,
+            knownBanks = emptyList(),
+            categories = categories,
+            accounts = accounts,
+            merchantMemories = memories
+        )
+
+        assertEquals(45_00L, parsed.extractedAmountMinor)
+        assertEquals("dani est", parsed.merchantName)
+        assertEquals(2L, parsed.suggestedCategoryId)
+        assertEquals(20L, parsed.matchedAccountId)
+    }
 }
+
