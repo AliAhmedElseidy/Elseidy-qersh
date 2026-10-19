@@ -1041,6 +1041,7 @@ private fun SmartActionOptionCard(
  * 6. شبكة التصنيفات (Category Grid من 4 أعمدة) مع أيقونات تعبيرية ملونة وتمييز التصنيف المختار بإطار ملون وخلفية خفيفة
  * 7. زر عريض وبارز في الأسفل "احفظ العملية"
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TransactionFormDialog(
     initialType: TransactionType,
@@ -1122,28 +1123,33 @@ fun TransactionFormDialog(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
     ) {
         Surface(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 12.dp, vertical = 20.dp),
+                .systemBarsPadding()
+                .imePadding()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.background
         ) {
             Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
+                modifier = Modifier.fillMaxSize()
             ) {
-                // شريط علوي للإغلاق والعنوان
+                // شريط علوي ثابت للإغلاق والعنوان
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (editingTransaction == null) "إضافة مصروف / دخل جديد" else "تعديل العملية المالية",
+                        text = if (editingTransaction == null) "إضافة عملية مالية جديدة" else "تعديل العملية المالية",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold
                     )
@@ -1152,10 +1158,12 @@ fun TransactionFormDialog(
                     }
                 }
 
+                // محتوى النموذج قابل للتمرير العمودي بالكامل
                 Column(
                     modifier = Modifier
                         .weight(1f)
-                        .verticalScroll(rememberScrollState()),
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     // 1. نوع العملية في الأعلى: أزرار التبديل (مصروف | دخل | استرداد مالي | تحويل بين الحسابات)
@@ -1205,7 +1213,7 @@ fun TransactionFormDialog(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 18.dp, horizontal = 16.dp),
+                                .padding(vertical = 16.dp, horizontal = 14.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
@@ -1263,8 +1271,12 @@ fun TransactionFormDialog(
                             }
 
                             if (showCurrencyPicker) {
-                                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    items(currencies) { cur ->
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    currencies.forEach { cur ->
                                         FilterChip(
                                             selected = currency == cur,
                                             onClick = {
@@ -1317,8 +1329,11 @@ fun TransactionFormDialog(
 
                                 if (isMonthlyObligation && obligations.isNotEmpty()) {
                                     Spacer(Modifier.height(6.dp))
-                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        items(obligations.filter { !it.isCompleted }) { obl ->
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        obligations.filter { !it.isCompleted }.forEach { obl ->
                                             FilterChip(
                                                 selected = selectedObligationId == obl.id,
                                                 onClick = {
@@ -1347,15 +1362,19 @@ fun TransactionFormDialog(
                             .testTag("tx_form_desc_input")
                     )
 
-                    // 5. اختيار الحساب: أزرار اختيار سريعة وواضحة للحساب (حساب الإنماء، حساب الراجحي، المحفظة النقدية)
+                    // 5. اختيار الحساب باستخدام FlowRow مرن حتى لا تنضغط النصوص عمودياً أو تخرج عن البطاقة
                     if (accounts.isNotEmpty()) {
                         Text(
                             text = if (selectedType == TransactionType.TRANSFER) "من الحساب:" else "اختيار الحساب:",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(accounts) { acc ->
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            accounts.forEach { acc ->
                                 val isAccSelected = selectedAccountId == acc.id
                                 FilterChip(
                                     selected = isAccSelected,
@@ -1366,7 +1385,8 @@ fun TransactionFormDialog(
                                     label = {
                                         Text(
                                             text = if (acc.accountLast4.isNotBlank()) "${acc.name} (*${acc.accountLast4})" else acc.name,
-                                            fontWeight = if (isAccSelected) FontWeight.Bold else FontWeight.Normal
+                                            fontWeight = if (isAccSelected) FontWeight.Bold else FontWeight.Normal,
+                                            maxLines = 1
                                         )
                                     },
                                     leadingIcon = {
@@ -1387,12 +1407,16 @@ fun TransactionFormDialog(
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(accounts.filter { it.id != selectedAccountId }) { acc ->
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            accounts.filter { it.id != selectedAccountId }.forEach { acc ->
                                 FilterChip(
                                     selected = selectedToAccountId == acc.id,
                                     onClick = { selectedToAccountId = acc.id },
-                                    label = { Text(acc.name) }
+                                    label = { Text(acc.name, maxLines = 1) }
                                 )
                             }
                         }
@@ -1411,40 +1435,52 @@ fun TransactionFormDialog(
                             onSelectCategory = { selectedCategoryId = it.id }
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(12.dp))
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // 7. زر عريض وبارز في أسفل الشاشة "احفظ العملية"
-                Button(
-                    onClick = {
-                        onSave(
-                            editingTransaction?.id ?: 0L,
-                            selectedType,
-                            amountText,
-                            currency,
-                            description,
-                            editingTransaction?.notes ?: "",
-                            selectedAccountId,
-                            if (selectedType == TransactionType.TRANSFER) selectedToAccountId else null,
-                            selectedCategoryId,
-                            editingTransaction?.merchantName ?: "",
-                            isMonthlyObligation,
-                            if (isMonthlyObligation) selectedObligationId else null
-                        )
-                        onDismiss()
-                    },
+                // 7. شريط سفلي ثابت دائماً فوق شريط التنقلولوحة المفاتيح يحتوي على زر "حفظ العملية"
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 3.dp,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(54.dp)
-                        .testTag("tx_form_save_btn"),
-                    shape = RoundedCornerShape(16.dp)
+                        .navigationBarsPadding()
                 ) {
-                    Text(
-                        text = "احفظ العملية",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Button(
+                        onClick = {
+                            onSave(
+                                editingTransaction?.id ?: 0L,
+                                selectedType,
+                                amountText,
+                                currency,
+                                description,
+                                editingTransaction?.notes ?: "",
+                                selectedAccountId,
+                                if (selectedType == TransactionType.TRANSFER) selectedToAccountId else null,
+                                selectedCategoryId,
+                                editingTransaction?.merchantName ?: "",
+                                isMonthlyObligation,
+                                if (isMonthlyObligation) selectedObligationId else null
+                            )
+                            onDismiss()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                            .height(54.dp)
+                            .testTag("tx_form_save_btn"),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "حفظ العملية",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }
@@ -1452,7 +1488,9 @@ fun TransactionFormDialog(
 }
 
 /**
- * شبكة مربعات التصنيفات (Grid من 4 أعمدة) مع أيقونة تعبيرية ملونة وتمييز التصنيف المختار بإطار ملون وخلفية خفيفة.
+ * شبكة مربعات التصنيفات (Grid من 4 أعمدة):
+ * - السماح لاسم التصنيف بالظهور على سطرين (maxLines = 2, textAlign = TextAlign.Center)
+ * - حجم خط مناسب (11.sp) وحشوة داخلية متوازنة حتى يظهر الاسم كاملاً وواضحاً بدون أي اقتصاص (...) وتحت الأيقونة مباشرة.
  */
 @Composable
 fun CategoryFourColumnGrid(
@@ -1487,7 +1525,7 @@ fun CategoryFourColumnGrid(
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .height(78.dp)
+                            .defaultMinSize(minHeight = 86.dp)
                             .clip(RoundedCornerShape(14.dp))
                             .background(bgColor)
                             .border(
@@ -1496,7 +1534,7 @@ fun CategoryFourColumnGrid(
                                 shape = RoundedCornerShape(14.dp)
                             )
                             .clickable { onSelectCategory(cat) }
-                            .padding(6.dp)
+                            .padding(horizontal = 4.dp, vertical = 8.dp)
                             .testTag("cat_grid_item_${cat.nameAr}"),
                         contentAlignment = Alignment.Center
                     ) {
@@ -1511,11 +1549,11 @@ fun CategoryFourColumnGrid(
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = cat.nameAr,
-                                style = MaterialTheme.typography.labelMedium,
+                                fontSize = 11.sp,
+                                lineHeight = 14.sp,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                                 color = if (isSelected) accentColor else MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                                maxLines = 2,
                                 textAlign = TextAlign.Center
                             )
                         }

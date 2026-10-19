@@ -1,5 +1,6 @@
 package com.example.domain
 
+import android.util.Base64
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.security.MessageDigest
@@ -14,7 +15,6 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
-import android.util.Base64
 
 /**
  * أدوات الحسابات المالية الدقيقة باستخدام BigDecimal ووحدات العملة الصغرى (الهللة / القرش = 1/100).
@@ -22,6 +22,21 @@ import android.util.Base64
  */
 object MoneyUtils {
     private val HUNDRED = BigDecimal("100")
+
+    private val ARABIC_MONTH_NAMES = arrayOf(
+        "يناير",
+        "فبراير",
+        "مارس",
+        "أبريل",
+        "مايو",
+        "يونيو",
+        "يوليو",
+        "أغسطس",
+        "سبتمبر",
+        "أكتوبر",
+        "نوفمبر",
+        "ديسمبر"
+    )
 
     fun normalizeDigits(input: String): String {
         val sb = StringBuilder(input.length)
@@ -174,6 +189,32 @@ object MoneyUtils {
         return String.format(Locale.US, "%04d-%02d", year, month)
     }
 
+    fun nextYearMonth(yearMonth: String): String {
+        val parts = yearMonth.split("-")
+        if (parts.size != 2) return currentYearMonth()
+        var year = parts[0].toIntOrNull() ?: 2026
+        var month = parts[1].toIntOrNull() ?: 1
+        month += 1
+        if (month > 12) {
+            month = 1
+            year += 1
+        }
+        return String.format(Locale.US, "%04d-%02d", year, month)
+    }
+
+    /**
+     * يحول صيغة الشهر "2026-10" إلى اسم الشهر العربي والسنة مثل "أكتوبر 2026".
+     */
+    fun formatArabicMonthYear(yearMonth: String): String {
+        val parts = yearMonth.split("-")
+        if (parts.size != 2) return yearMonth
+        val year = parts[0].toIntOrNull() ?: 2026
+        val monthIndex = (parts[1].toIntOrNull() ?: 1).coerceIn(1, 12) - 1
+        return "${ARABIC_MONTH_NAMES[monthIndex]} $year"
+    }
+
+    fun formatYearMonthArabic(yearMonth: String): String = formatArabicMonthYear(yearMonth)
+
     fun monthRangeMillis(yearMonth: String): Pair<Long, Long> {
         val parts = yearMonth.split("-")
         val year = parts.getOrNull(0)?.toIntOrNull() ?: 2026
@@ -194,6 +235,11 @@ object MoneyUtils {
         return startCal.timeInMillis to endCal.timeInMillis
     }
 
+    fun isTimestampInYearMonth(timestamp: Long, yearMonth: String): Boolean {
+        val (start, end) = monthRangeMillis(yearMonth)
+        return timestamp in start..end
+    }
+
     fun todayRangeMillis(nowMillis: Long = System.currentTimeMillis()): Pair<Long, Long> {
         val startCal = Calendar.getInstance().apply {
             timeInMillis = nowMillis
@@ -210,7 +256,7 @@ object MoneyUtils {
     }
 
     fun formatArabicDate(timeMillis: Long): String {
-        val sdf = SimpleDateFormat("yyyy/MM/dd - hh:mm a", Locale("ar"))
+        val sdf = SimpleDateFormat("yyyy/MM/dd - hh:mm a", Locale.forLanguageTag("ar"))
         return sdf.format(Date(timeMillis))
     }
 

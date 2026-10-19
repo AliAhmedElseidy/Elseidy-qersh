@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -11,9 +12,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -31,8 +34,10 @@ import com.example.data.local.*
 import com.example.domain.MoneyUtils
 import com.example.ui.theme.*
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SmsReviewScreen(
+    selectedYearMonth: String = MoneyUtils.currentYearMonth(),
     suggestedTransactions: List<SuggestedTransactionEntity>,
     banks: List<BankEntity>,
     smsRules: List<SmsRuleEntity>,
@@ -43,6 +48,7 @@ fun SmsReviewScreen(
     onIgnoreSuggested: (SuggestedTransactionEntity) -> Unit,
     onMarkDuplicate: (SuggestedTransactionEntity) -> Unit,
     onToggleBankSms: (BankEntity, Boolean) -> Unit,
+    onToggleBankAutoApprove: (BankEntity, Boolean) -> Unit = { _, _ -> },
     onAddCustomBank: (String, String, String, String) -> Unit,
     onAddCustomRule: (Long, String, String, SmsSuggestedType) -> Unit,
     onIngestManualOrTestSms: (String, String, Boolean) -> Unit,
@@ -52,11 +58,12 @@ fun SmsReviewScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var selectedSection by remember { mutableIntStateOf(0) } // 0 = Review Queue, 1 = Banks & Rules & Sandbox, 2 = History
+    var selectedSection by remember { mutableIntStateOf(0) } // 0 = Review Queue, 1 = Sender Rules & Control + Sandbox, 2 = History
     var editingSuggested by remember { mutableStateOf<SuggestedTransactionEntity?>(null) }
     var showPermissionExplanationDialog by remember { mutableStateOf(false) }
 
     val accMap = remember(accounts) { accounts.associateBy { it.id } }
+    val monthArabicLabel = remember(selectedYearMonth) { MoneyUtils.formatYearMonthArabic(selectedYearMonth) }
 
     var hasSmsPermission by remember {
         mutableStateOf(
@@ -97,18 +104,18 @@ fun SmsReviewScreen(
     ) {
         item {
             Text(
-                text = "رسائل البنوك والمراجعة الذكية",
+                text = "رسائل البنوك والمراجعة الذكية ($monthArabicLabel)",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "يتم استبعاد رسائل التفعيل ورموز OTP تلقائياً، وربط الحسابات والبطاقات (*2000 / *5650) ذكياً. اضغط على أي كارت لتعديل بياناته قبل الإضافة.",
+                text = "قراءة رسائل شهر $monthArabicLabel فقط (من يوم 1 حتى اليوم)، مع التعرف الذكي على اسم المرسل الفعلي (Alinma, AlRajhi, Enjaz, Urpay, STC Pay, VF-Cash) واستبعاد رسائل التفعيل وOTP تلقائياً.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
 
-        // بطاقة الصلاحيات وفحص صندوق الرسائل الفعلي
+        // بطاقة الصلاحيات وفحص صندوق الرسائل الفعلي والعمل في الخلفية
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -126,13 +133,13 @@ fun SmsReviewScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
-                            text = if (hasSmsPermission) "الرصد التلقائي للرسائل البنكية مفعل"
-                            else "تفعيل قراءة رسائل البنوك من الهاتف",
+                            text = if (hasSmsPermission) "الرصد التلقائي في الخلفية والإشعارات مفعل"
+                            else "تفعيل قراءة رسائل البنوك والإشعارات الفورية",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "المعالجة محلية ١٠٠٪ على جهازك دون إرسال أي بيانات للإنترنت.",
+                            text = "يعمل حتى والتطبيق مغلق مع إشعار فوري بأزرار (أضف / تجاهل) أو اعتماد تلقائي حسب إعدادات كل جهة.",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
@@ -149,7 +156,7 @@ fun SmsReviewScreen(
                     ) {
                         Icon(Icons.Default.Sms, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text(if (hasSmsPermission) "فحص الوارد" else "منح الصلاحية")
+                        Text(if (hasSmsPermission) "فحص الشهر" else "منح الصلاحية")
                     }
                 }
             }
@@ -162,7 +169,7 @@ fun SmsReviewScreen(
                     FilterChip(
                         selected = selectedSection == 0,
                         onClick = { selectedSection = 0 },
-                        label = { Text("عمليات تحتاج مراجعة (${reviewQueueItems.size})") },
+                        label = { Text("الرسائل التي تحتاج مراجعة (${reviewQueueItems.size})") },
                         modifier = Modifier.testTag("sms_pending_tab")
                     )
                 }
@@ -170,7 +177,7 @@ fun SmsReviewScreen(
                     FilterChip(
                         selected = selectedSection == 1,
                         onClick = { selectedSection = 1 },
-                        label = { Text("البنوك ومختبر الرسائل") },
+                        label = { Text("إدارة جهات الرسائل المسموحة (${banks.size})") },
                         modifier = Modifier.testTag("sms_rules_sandbox_tab")
                     )
                 }
@@ -190,8 +197,8 @@ fun SmsReviewScreen(
                 if (reviewQueueItems.isEmpty()) {
                     item {
                         EmptySmsQueueCard(
-                            title = "لا توجد رسائل بنكية تحتاج إلى مراجعة حاليًا",
-                            subtitle = "يمكنك فحص صندوق الوارد أو تجربة محلل رسائل البنوك (بما فيها رسائل Samsung Wallet ومصرف الإنماء) من تبويب «البنوك ومختبر الرسائل».",
+                            title = "لا توجد رسائل بنكية تحتاج إلى مراجعة في شهر $monthArabicLabel",
+                            subtitle = "يتم عرض رسائل شهر $monthArabicLabel فقط لمنع تراكم الرسائل القديمة. يمكنك فحص صندوق الوارد أو ضبط «إدارة جهات الرسائل المسموحة» والاعتماد التلقائي.",
                             onOpenSandbox = { selectedSection = 1 }
                         )
                     }
@@ -220,6 +227,7 @@ fun SmsReviewScreen(
                         banks = banks,
                         smsRules = smsRules,
                         onToggleBankSms = onToggleBankSms,
+                        onToggleBankAutoApprove = onToggleBankAutoApprove,
                         onAddCustomBank = onAddCustomBank,
                         onAddCustomRule = onAddCustomRule,
                         onIngestSms = onIngestManualOrTestSms,
@@ -235,7 +243,7 @@ fun SmsReviewScreen(
                 if (reviewedItems.isEmpty()) {
                     item {
                         Text(
-                            text = "لا توجد رسائل تمت مراجعتها بعد.",
+                            text = "لا توجد رسائل تمت مراجعتها في شهر $monthArabicLabel بعد.",
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.padding(24.dp)
                         )
@@ -254,8 +262,15 @@ fun SmsReviewScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
+                                    val senderLabel = if (item.senderAddress.isNotBlank() &&
+                                        !item.bankName.equals(item.senderAddress, ignoreCase = true)
+                                    ) {
+                                        "${item.bankName} (${item.senderAddress})"
+                                    } else {
+                                        item.bankName
+                                    }
                                     Text(
-                                        text = "${item.bankName} • ${item.merchantName.ifBlank { item.suggestedType.titleAr }}",
+                                        text = "$senderLabel • ${item.merchantName.ifBlank { item.suggestedType.titleAr }}",
                                         style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -290,24 +305,27 @@ fun SmsReviewScreen(
     if (showPermissionExplanationDialog) {
         AlertDialog(
             onDismissRequest = { showPermissionExplanationDialog = false },
-            title = { Text("لماذا نطلب صلاحية الرسائل النصية؟") },
+            title = { Text("لماذا نطلب صلاحية الرسائل والإشعارات؟") },
             text = {
                 Text(
-                    "يحتاج تطبيق «الصعيدي قرش» إلى صلاحية استقبال/قراءة الرسائل (SMS) حصريًا للتعرف على إشعارات البنوك (مثل الإنماء والراجحي والأهلي) وتحويلها محليًا على هاتفك إلى عمليات مقترحة تراجعها بنفسك.\n\n" +
-                        "• يتم استبعاد رسائل التفعيل ورموز التحقق (OTP) تلقائياً.\n" +
-                        "• لا يملك التطبيق صلاحية الاتصال بالإنترنت أصلًا."
+                    "يحتاج تطبيق «الصعيدي قرش» إلى صلاحية استقبال/قراءة الرسائل (SMS) للتعرف على إشعارات البنوك والمحافظ (مثل الإنماء، الراجحي، إنجاز، Urpay، STC Pay، فودافون كاش) حتى والتطبيق مغلق.\n\n" +
+                        "• يعرض التطبيق اسم المرسل الحقيقي للرسالة دون افتراض خاطئ.\n" +
+                        "• يرسل لك إشعاراً فورياً بأزرار (أضف / تجاهل) أو يعتمدها تلقائياً حسب اختيارك.\n" +
+                        "• يقرأ رسائل الشهر الحالي فقط ولا يرسل أي بيانات للإنترنت."
                 )
             },
             confirmButton = {
                 Button(
                     onClick = {
                         showPermissionExplanationDialog = false
-                        smsPermissionLauncher.launch(
-                            arrayOf(
-                                Manifest.permission.RECEIVE_SMS,
-                                Manifest.permission.READ_SMS
-                            )
-                        )
+                        val perms = buildList {
+                            add(Manifest.permission.RECEIVE_SMS)
+                            add(Manifest.permission.READ_SMS)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                add(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                        }.toTypedArray()
+                        smsPermissionLauncher.launch(perms)
                     }
                 ) {
                     Text("موافق ومنح الصلاحية")
@@ -337,16 +355,7 @@ fun SmsReviewScreen(
 }
 
 /**
- * ثانياً: التصميم العصري الجديد لكارت "رسائل البنك" (Bank SMS Review Card):
- * 1. الهيدر:
- *    - على اليمين (في RTL): اسم البنك (مثل: مصرف الإنماء) مع أيقونة دائرية، وتحته تاريخ ووقت الرسالة بخط هادئ، واسم التاجر/الجهة (مثل: dani est).
- *    - على اليسار (في RTL): المبلغ المستخرج بخط كبير وبارز جداً (مثال: "10.00 ر.س")، وفي حال تعذر قراءته يكتب "تحديد المبلغ يدوياً".
- * 2. جسم الكارت:
- *    - صندوق أنيق بحواف دائرية (Rounded Box) ولون خلفية مميز يعرض النص الأصلي للرسالة البنكية بوضوح.
- * 3. الأزرار السفلية:
- *    - زر رئيسي عريض وبارز (بلون التطبيق الأساسي): "أضف"
- *    - زر ثانوي (بجانبه): "تجاهل"
- *    - الضغط على الكارت نفسه أو أيقونة التعديل يفتح نافذة "تعديل البيانات".
+ * كارت مراجعة الرسالة البنكية مع إظهار الاسم الحقيقي للمرسل (Sender ID) والبنك/الجهة الفعلية
  */
 @Composable
 fun SuggestedTransactionReviewCard(
@@ -378,7 +387,7 @@ fun SuggestedTransactionReviewCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Top
             ) {
-                // على اليمين (Start في RTL): أيقونة دائرية + اسم البنك + التاريخ والوقت + التاجر/الجهة
+                // على اليمين (Start في RTL): أيقونة دائرية + اسم الجهة الحقيقي + معرف المرسل + التاريخ والوقت + التاجر
                 Row(
                     modifier = Modifier.weight(1f),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -400,12 +409,32 @@ fun SuggestedTransactionReviewCard(
                     }
 
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = item.bankName,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = item.bankName.ifBlank { item.senderAddress },
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            if (item.senderAddress.isNotBlank() &&
+                                !item.bankName.equals(item.senderAddress, ignoreCase = true)
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.secondaryContainer
+                                ) {
+                                    Text(
+                                        text = item.senderAddress,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
                         Text(
                             text = MoneyUtils.formatArabicDate(item.smsTimestamp),
                             style = MaterialTheme.typography.bodySmall,
@@ -573,12 +602,13 @@ private fun EmptySmsQueueCard(
                 onClick = onOpenSandbox,
                 modifier = Modifier.testTag("open_sms_sandbox_btn")
             ) {
-                Text("فتح مختبر الرسائل البنكية وإعدادات البنوك")
+                Text("إدارة جهات الرسائل المسموحة ومختبر الرسائل")
             }
         }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EditSuggestedTransactionDialog(
     item: SuggestedTransactionEntity,
@@ -601,9 +631,12 @@ private fun EditSuggestedTransactionDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("تعديل البيانات قبل الحفظ") },
+        title = { Text("تعديل البيانات قبل الحفظ (${item.bankName})") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 OutlinedTextField(
                     value = amountText,
                     onValueChange = { amountText = it },
@@ -633,8 +666,11 @@ private fun EditSuggestedTransactionDialog(
 
                 if (accounts.isNotEmpty()) {
                     Text("الحساب المرتبط:", style = MaterialTheme.typography.labelLarge)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(accounts) { acc ->
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        accounts.forEach { acc ->
                             FilterChip(
                                 selected = selectedAccId == acc.id,
                                 onClick = { selectedAccId = acc.id },
@@ -674,20 +710,28 @@ private fun EditSuggestedTransactionDialog(
     )
 }
 
+/**
+ * شاشة "إدارة جهات الرسائل المسموحة" (Sender Rules & Control) + مختبر الرسائل:
+ * - تعرض قائمة بالجهات المكتشفة في رسائل المستخدم (مثل: Alinma, AlRajhi, Enjaz, Vodafone, Urpay, STC Pay, CIB, NBE, Fawry).
+ * - لكل جهة (مرسل) خياران مستقلان يتحكم بهما المستخدم:
+ *   أ) مفتاح تفعيل (Toggle 1): "قراءة رسائل هذه الجهة" (مفعّل / معطّل) — إذا عطله المستخدم، يتجاهل التطبيق رسائل هذه الجهة تماماً.
+ *   ب) مفتاح تفعيل منفصل (Toggle 2 - ميزة مستقلة): "اعتماد وتسجيل تلقائي فوري (Auto-Approve)" — إذا فعّله المستخدم، يقوم التطبيق عند وصول الرسالة باستخراج المبلغ وتسجيل العملية فوراً في الحساب المرتبط دون انتظار مراجعة يدوية.
+ */
 @Composable
 private fun SmsSandboxAndBanksSection(
     banks: List<BankEntity>,
     smsRules: List<SmsRuleEntity>,
     onToggleBankSms: (BankEntity, Boolean) -> Unit,
+    onToggleBankAutoApprove: (BankEntity, Boolean) -> Unit,
     onAddCustomBank: (String, String, String, String) -> Unit,
     onAddCustomRule: (Long, String, String, SmsSuggestedType) -> Unit,
     onIngestSms: (String, String, Boolean) -> Unit,
     onLoadSandboxSamples: () -> Unit,
     onClearSandbox: () -> Unit
 ) {
-    var testSender by remember { mutableStateOf("Alinma") }
+    var testSender by remember { mutableStateOf("Enjaz") }
     var testSmsBody by remember {
-        mutableStateOf("شراء عبر Samsung Wallet مبلغ: ريال سعودى 10 بطاقة مدى: *5650 حساب: *2000 من: dani est")
+        mutableStateOf("حوالة صادرة عبر إنجاز بمبلغ: 550.00 ريال سعودي المستفيد: محمد أحمد مرجع: ENJ99120")
     }
     var newBankName by remember { mutableStateOf("") }
     var newBankSender by remember { mutableStateOf("") }
@@ -698,6 +742,172 @@ private fun SmsSandboxAndBanksSection(
     var ruleBankId by remember { mutableStateOf(banks.firstOrNull()?.id ?: 1L) }
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        // 1. شاشة إدارة جهات الرسائل المسموحة (Sender Rules & Control)
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("sender_rules_control_card"),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "إدارة جهات الرسائل المسموحة (Sender Rules & Control)",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "يتعرف التطبيق تلقائياً على اسم المرسل الفعلي (Alinma, AlRajhi, Enjaz, Urpay, STC Pay, VF-Cash...) ويمكنك التحكم في كل جهة بشكل مستقل:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                banks.forEach { bank ->
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("sender_control_item_${bank.code}"),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        border = BorderStroke(
+                            1.dp,
+                            if (bank.smsEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = bank.nameAr,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "معرف المرسل (Sender ID): ${bank.senderIdsCsv} • ${bank.defaultCurrency}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (bank.smsEnabled) IncomeGreen.copy(alpha = 0.14f)
+                                    else ExpenseRed.copy(alpha = 0.14f)
+                                ) {
+                                    Text(
+                                        text = if (bank.smsEnabled) "مسموح" else "متجاهل",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (bank.smsEnabled) IncomeGreen else ExpenseRed,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+
+                            // أ) مفتاح تفعيل (Toggle 1): قراءة رسائل هذه الجهة
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "قراءة رسائل هذه الجهة",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = if (bank.smsEnabled) "مفعّل: يستقبل ويحلل رسائل هذه الجهة"
+                                        else "معطّل: يتجاهل التطبيق رسائل هذه الجهة تماماً",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = bank.smsEnabled,
+                                    onCheckedChange = { enabled -> onToggleBankSms(bank, enabled) },
+                                    modifier = Modifier.testTag("toggle_bank_${bank.code}")
+                                )
+                            }
+
+                            // ب) مفتاح تفعيل منفصل (Toggle 2 - ميزة مستقلة): اعتماد وتسجيل تلقائي فوري (Auto-Approve)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "اعتماد وتسجيل تلقائي فوري (Auto-Approve)",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (bank.autoApproveEnabled) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = if (bank.autoApproveEnabled) "مفعّل: استخراج المبلغ وتسجيل العملية فوراً في الحساب المرتبط دون انتظار مراجعة"
+                                        else "معطّل: إرسال إشعار وإضافة الرسالة لقائمة المراجعة اليدوية",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = bank.autoApproveEnabled,
+                                    enabled = bank.smsEnabled,
+                                    onCheckedChange = { autoApprove -> onToggleBankAutoApprove(bank, autoApprove) },
+                                    modifier = Modifier.testTag("toggle_auto_approve_${bank.code}")
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Text("إضافة جهة رسائل / بنك جديد يدوياً:", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = newBankName,
+                        onValueChange = { newBankName = it },
+                        label = { Text("اسم الجهة (مثل: باي موب)") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = newBankSender,
+                        onValueChange = { newBankSender = it },
+                        label = { Text("معرف المرسل SMS") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Button(
+                    onClick = {
+                        if (newBankName.isNotBlank() && newBankSender.isNotBlank()) {
+                            onAddCustomBank(newBankName, newBankSender, newBankCurrency, newBankSender)
+                            newBankName = ""
+                            newBankSender = ""
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("إضافة جهة الرسائل")
+                }
+            }
+        }
+
+        // 2. مختبر تحليل رسائل البنوك والمحافظ
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp)
@@ -707,26 +917,26 @@ private fun SmsSandboxAndBanksSection(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "مختبر تحليل رسائل البنوك (Samsung Wallet / الإنماء / الراجحي / SNB)",
+                    text = "مختبر تحليل رسائل الجهات (Alinma / Enjaz / Urpay / STC Pay / VF-Cash)",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "جرّب تحليل الرسالة أدناه أو حمّل حزمة الرسائل التجريبية لاختبار استخراج المبالغ، الربط الذكي مع حساب *2000 وبطاقة *5650، والفلترة التلقائية لرسائل OTP وتفعيل المستفيد.",
+                    text = "اختبر قراءة اسم المرسل الفعلي مباشرة دون نسبته بالخطأ للراجحي أو الإنماء، أو حمّل حزمة الرسائل المتنوعة لتجربة الاكتشاف الذكي للمرسل والاعتماد التلقائي.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 OutlinedTextField(
                     value = testSender,
                     onValueChange = { testSender = it },
-                    label = { Text("اسم المرسل (مثل Alinma أو AlRajhiBank أو SNB)") },
+                    label = { Text("اسم المرسل الفعلي (مثل Enjaz أو Urpay أو STC Pay أو VF-Cash أو Alinma)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("sandbox_sender_input")
                 )
                 OutlinedTextField(
                     value = testSmsBody,
                     onValueChange = { testSmsBody = it },
-                    label = { Text("نص الرسالة البنكية") },
+                    label = { Text("نص الرسالة المالية") },
                     minLines = 3,
                     modifier = Modifier.fillMaxWidth().testTag("sandbox_body_input")
                 )
@@ -756,74 +966,7 @@ private fun SmsSandboxAndBanksSection(
             }
         }
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text(
-                    text = "البنوك المدعومة (تفعيل / إيقاف قراءة الرسائل لكل بنك)",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                banks.forEach { bank ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(bank.nameAr, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                text = "معرفات المرسل: ${bank.senderIdsCsv} • العملة: ${bank.defaultCurrency}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = bank.smsEnabled,
-                            onCheckedChange = { enabled -> onToggleBankSms(bank, enabled) },
-                            modifier = Modifier.testTag("toggle_bank_${bank.code}")
-                        )
-                    }
-                    HorizontalDivider()
-                }
-
-                Text("إضافة بنك جديد قابل للتوسعة:", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = newBankName,
-                        onValueChange = { newBankName = it },
-                        label = { Text("اسم البنك") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = newBankSender,
-                        onValueChange = { newBankSender = it },
-                        label = { Text("اسم المرسل SMS") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                Button(
-                    onClick = {
-                        if (newBankName.isNotBlank() && newBankSender.isNotBlank()) {
-                            onAddCustomBank(newBankName, newBankSender, newBankCurrency, newBankSender)
-                            newBankName = ""
-                            newBankSender = ""
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("إضافة البنك")
-                }
-            }
-        }
-
+        // 3. قواعد التعرف المخصصة
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp)
@@ -833,7 +976,7 @@ private fun SmsSandboxAndBanksSection(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
-                    text = "قواعد التعرف على رسائل البنوك (${smsRules.size} قاعدة نشطة)",
+                    text = "قواعد التعرف على الرسائل (${smsRules.size} قاعدة نشطة)",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -869,8 +1012,10 @@ private fun SmsSandboxAndBanksSection(
 }
 
 /**
- * شاشة إدارة الحسابات والبنوك والتسوية اليدوية مع دعم آخر 4 أرقام للحساب والبطاقة للربط الذكي.
+ * شاشة إدارة الحسابات والبنوك والتسوية اليدوية مع دعم آخر 4 أرقام للحساب والبطاقة للربط الذكي،
+ * واستخدام FlowRow مرن لأزرار اختيار الحساب والعملة والبنك.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AccountsManagementScreen(
     accounts: List<AccountEntity>,
@@ -937,7 +1082,7 @@ fun AccountsManagementScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = account.name,
                                 style = MaterialTheme.typography.titleMedium,
@@ -1005,18 +1150,24 @@ fun AccountsManagementScreen(
             onDismissRequest = { showAddDialog = false },
             title = { Text("إضافة حساب مالي جديد") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     OutlinedTextField(
                         value = name,
                         onValueChange = { name = it },
-                        label = { Text("اسم الحساب (مثل: حساب الإنماء أو حساب الراجحي)") },
+                        label = { Text("اسم الحساب (مثل: حساب الإنماء أو محفظة Urpay)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("new_account_name_input")
                     )
 
                     Text("نوع الحساب:", style = MaterialTheme.typography.labelLarge)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(AccountType.entries) { aType ->
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        AccountType.entries.forEach { aType ->
                             FilterChip(
                                 selected = selectedType == aType,
                                 onClick = { selectedType = aType },
@@ -1026,7 +1177,7 @@ fun AccountsManagementScreen(
                     }
 
                     if (selectedType != AccountType.CASH && banks.isNotEmpty()) {
-                        Text("البنك المرتبط:", style = MaterialTheme.typography.labelLarge)
+                        Text("البنك / الجهة المرتبطة:", style = MaterialTheme.typography.labelLarge)
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             items(banks) { b ->
                                 FilterChip(
@@ -1062,26 +1213,26 @@ fun AccountsManagementScreen(
                         )
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = openingBalance,
-                            onValueChange = { openingBalance = it },
-                            label = { Text("الرصيد الافتتاحي") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine = true,
-                            modifier = Modifier.weight(1.3f).testTag("new_account_balance_input")
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("العملة", style = MaterialTheme.typography.labelMedium)
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                items(listOf("SAR", "EGP", "AED", "USD")) { cur ->
-                                    FilterChip(
-                                        selected = currency == cur,
-                                        onClick = { currency = cur },
-                                        label = { Text(MoneyUtils.currencySymbol(cur)) }
-                                    )
-                                }
-                            }
+                    OutlinedTextField(
+                        value = openingBalance,
+                        onValueChange = { openingBalance = it },
+                        label = { Text("الرصيد الافتتاحي") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("new_account_balance_input")
+                    )
+
+                    Text("العملة:", style = MaterialTheme.typography.labelLarge)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf("SAR", "EGP", "AED", "USD").forEach { cur ->
+                            FilterChip(
+                                selected = currency == cur,
+                                onClick = { currency = cur },
+                                label = { Text("${MoneyUtils.currencySymbol(cur)} ($cur)") }
+                            )
                         }
                     }
                 }

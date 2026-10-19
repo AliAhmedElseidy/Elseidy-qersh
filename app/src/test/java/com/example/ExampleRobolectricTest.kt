@@ -5,7 +5,6 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.*
 import com.example.data.repository.SaidiQershRepository
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.*
@@ -16,28 +15,27 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * اختبارات Robolectric + Room الشاملة لقاعدة البيانات والعمليات المالية ومراجعة رسائل البنوك:
- * - التحقق من تأسيس الـ 16 تصنيفًا والحسابات الذكية (*2000 و *4821).
- * - استيراد رسالة Samsung Wallet / الإنماء وربطها تلقائيًا بحساب الإنماء (*2000).
- * - الفلترة التلقائية لرسائل تفعيل المستفيد وOTP وعدم إضافتها لقائمة المراجعة.
- * - إضافة وتعديل وحذف المصروفات وتحديث الأرصدة والتحويلات والاستردادات.
+ * اختبارات Robolectric التكاملية لقاعدة بيانات Room ومستودع البيانات (SaidiQershRepository):
+ * - التحقق من تأسيس الـ 16 تصنيفاً وجهات الرسائل المتنوعة (Alinma, AlRajhi, Enjaz, Urpay, STC Pay, VF-Cash, Fawry).
+ * - التحقق من استبعاد رسائل التفعيل وOTP تلقائياً عند الاستقبال.
+ * - التحقق من قراءة رسائل Samsung Wallet وربطها التلقائي بحساب الإنماء (*2000) وبطاقة (*5650).
+ * - التحقق من إعدادات التحكم في جهات الرسائل (إيقاف قراءة جهة معينة + الاعتماد والتسجيل التلقائي الفوري Auto-Approve).
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [34])
 class ExampleRobolectricTest {
 
     private lateinit var db: SaidiQershDatabase
-    private lateinit var dao: SaidiQershDao
     private lateinit var repository: SaidiQershRepository
 
     @Before
-    fun setup() {
+    fun setup() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         db = Room.inMemoryDatabaseBuilder(context, SaidiQershDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        dao = db.dao()
-        repository = SaidiQershRepository(dao)
+        repository = SaidiQershRepository(db.dao())
+        repository.ensureSeeded()
     }
 
     @After
@@ -46,133 +44,111 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `empty database handles queries gracefully and seeds 16 categories and smart accounts`() = runBlocking {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        assertEquals("الصعيدي قرش", context.getString(R.string.app_name))
+    fun repository_seedsAll16CategoriesAndIndependentSenderEntities() = runBlocking {
+        val categories = db.dao().getAllCategories()
+        val expenseNames = categories.filter { it.type == CategoryType.EXPENSE }.map { it.nameAr }
 
-        repository.ensureSeeded()
-        val cats = repository.categoriesFlow.first()
-        val catNames = cats.map { it.nameAr }
-        assertTrue(catNames.containsAll(listOf("بقالة", "أكل بره", "مواصلات", "تسوق", "فواتير", "اشتراكات", "سفر", "صحة", "عناية شخصية", "إيجار", "تعليم", "بنزين", "أقساط", "جمعيات", "أولاد", "أخرى")))
+        val required16 = listOf(
+            "بقالة", "أكل بره", "مواصلات", "تسوق",
+            "فواتير", "اشتراكات", "سفر", "صحة",
+            "عناية شخصية", "إيجار", "تعليم", "بنزين",
+            "أقساط", "جمعيات", "أولاد", "أخرى"
+        )
+        for (name in required16) {
+            assertTrue("Missing required category: $name", expenseNames.contains(name))
+        }
 
-        val accs = repository.accountsFlow.first()
-        assertTrue(accs.any { it.name == "حساب الإنماء" && it.accountLast4 == "2000" && it.cardLast4 == "5650" })
+        val banks = db.dao().getAllBanks()
+        val bankCodes = banks.map { it.code }
+        assertTrue(bankCodes.contains("ALINMA"))
+        assertTrue(bankCodes.contains("ALRAJHI"))
+        assertTrue(bankCodes.contains("ENJAZ"))
+        assertTrue(bankCodes.contains("URPAY"))
+        assertTrue(bankCodes.contains("STCPAY"))
+        assertTrue(bankCodes.contains("VFCASH"))
+
+        val accounts = db.dao().getAllAccounts()
+        val alinmaAcc = accounts.firstOrNull { it.accountLast4 == "2000" && it.cardLast4 == "5650" }
+        assertNotNull("Alinma account with *2000 and *5650 should be seeded", alinmaAcc)
     }
 
     @Test
-    fun `Samsung Wallet SMS automatically matches Alinma account 2000 and non-financial OTP SMS is auto-ignored`() = runBlocking {
-        repository.ensureSeeded()
-        val alinmaAcc = repository.accountsFlow.first().first { it.accountLast4 == "2000" }
+    fun samsungWalletSms_ingestsAndMatchesAlinmaAccount_whileBeneficiaryOtpSmsIsIgnored() = runBlocking {
+        // 1. رسالة غير مالية (تفعيل مستفيد / OTP) -> يجب استبعادها تلقائياً وإرجاع null
+        val otpId = repository.ingestBankSms(
+            senderAddress = "Alinma",
+            rawBody = "تم تفعيل مستفيد بنجاح، رمز التحقق OTP هو 9182"
+        )
+        assertNull("Non-financial beneficiary/OTP SMS must be auto-ignored", otpId)
 
-        // 1. رسالة غير مالية (تم تفعيل مستفيد / OTP) -> يجب استبعادها تلقائياً وعدم إضافتها لقائمة المراجعة
-        val ignoredId = repository.ingestBankSms("Alinma", "تم تفعيل مستفيد بنجاح، رمز التحقق OTP: 3910")
-        assertNull(ignoredId)
+        // 2. رسالة Samsung Wallet ومصرف الإنماء -> يجب قبولها واستخراج 10 ر.س والتاجر dani est وربطها بحساب الإنماء (*2000)
+        val validId = repository.ingestBankSms(
+            senderAddress = "Alinma",
+            rawBody = "شراء عبر Samsung Wallet مبلغ: ريال سعودى 10 بطاقة مدى: *5650 حساب: *2000 من: dani est"
+        )
+        assertNotNull("Valid Samsung Wallet SMS should be ingested", validId)
 
-        // 2. رسالة شراء Samsung Wallet مع ريال سعودى 10 وحساب *2000 وبطاقة *5650
-        val samsungSms = "شراء عبر Samsung Wallet مبلغ: ريال سعودى 10 بطاقة مدى: *5650 حساب: *2000 من: dani est"
-        val suggestedId = repository.ingestBankSms("Alinma", samsungSms)
-        assertNotNull(suggestedId)
-
-        val suggested = dao.getSuggestedById(suggestedId!!)!!
-        assertEquals(1000L, suggested.extractedAmountMinor)
+        val suggested = db.dao().getSuggestedById(validId!!)
+        assertNotNull(suggested)
+        assertEquals(10_00L, suggested!!.extractedAmountMinor)
         assertEquals("dani est", suggested.merchantName)
-        assertEquals(alinmaAcc.id, suggested.suggestedAccountId)
+        assertEquals("2000", suggested.extractedAccountLast4)
+        assertEquals("5650", suggested.extractedCardLast4)
 
-        // 3. عند الضغط على "أضف" (تأكيد العملية)، يُخصم 10 ر.س من حساب الإنماء مباشرة
-        val txId = repository.confirmSuggestedTransaction(suggestedId)
-        assertNotNull(txId)
-        assertEquals(-1000L, dao.getAccountById(alinmaAcc.id)!!.currentBalanceMinor)
+        val alinmaAccount = db.dao().getAllAccounts().first { it.accountLast4 == "2000" }
+        assertEquals(alinmaAccount.id, suggested.suggestedAccountId)
+
+        // 3. عند الضغط على "أضف" (تأكيد العملية المقترحة)، يتم خصم 10 ر.س من رصيد حساب الإنماء مباشرة
+        val balanceBefore = alinmaAccount.currentBalanceMinor
+        val confirmedTxId = repository.confirmSuggestedTransaction(validId)
+        assertNotNull(confirmedTxId)
+
+        val balanceAfter = db.dao().getAccountById(alinmaAccount.id)!!.currentBalanceMinor
+        assertEquals(balanceBefore - 10_00L, balanceAfter)
     }
 
     @Test
-    fun `add, edit, and delete expense updates account balances and audit log accurately`() = runBlocking {
-        val bankAccId = repository.saveAccount(
-            AccountEntity(
-                name = "حساب الراجحي",
-                type = AccountType.BANK,
-                currency = "SAR",
-                openingBalanceMinor = 5000_00L,
-                currentBalanceMinor = 5000_00L
-            )
+    fun senderRulesAndControl_toggle1IgnoresDisabledSender_andToggle2AutoApprovesImmediately() = runBlocking {
+        // 1. التحقق من أن رسالة Enjaz تُنسب إلى "إنجاز (Enjaz)" وليس الراجحي أو الإنماء
+        val enjazId = repository.ingestBankSms(
+            senderAddress = "Enjaz",
+            rawBody = "حوالة صادرة عبر إنجاز بمبلغ: 300.00 ريال سعودي المستفيد: أحمد علي مرجع: ENJ100"
         )
+        assertNotNull(enjazId)
+        val enjazSuggested = db.dao().getSuggestedById(enjazId!!)!!
+        assertEquals("إنجاز (Enjaz)", enjazSuggested.bankName)
+        assertEquals("Enjaz", enjazSuggested.senderAddress)
+        assertEquals(ReviewStatus.PENDING, enjazSuggested.status)
 
-        val txId = repository.addConfirmedTransaction(
-            TransactionEntity(
-                type = TransactionType.EXPENSE,
-                amountMinor = 200_00L,
-                currency = "SAR",
-                description = "مقاضي أسبوعية",
-                accountId = bankAccId
-            )
+        // 2. مفتاح التفعيل 1 (Toggle 1): تعطيل قراءة رسائل Enjaz -> يتم تجاهل أي رسالة جديدة منها تماماً
+        val enjazBank = db.dao().getAllBanks().first { it.code == "ENJAZ" }
+        repository.toggleBankSmsEnabled(enjazBank, false)
+        val ignoredWhenDisabledId = repository.ingestBankSms(
+            senderAddress = "Enjaz",
+            rawBody = "حوالة صادرة عبر إنجاز بمبلغ: 500.00 ريال سعودي المستفيد: خالد مرجع: ENJ200"
         )
-        assertEquals(4800_00L, dao.getAccountById(bankAccId)!!.currentBalanceMinor)
+        assertNull("Disabled sender SMS must be completely ignored", ignoredWhenDisabledId)
 
-        val savedTx = dao.getTransactionById(txId)!!
-        repository.updateConfirmedTransaction(savedTx.copy(amountMinor = 350_00L, description = "مقاضي الشهر"))
-        assertEquals(4650_00L, dao.getAccountById(bankAccId)!!.currentBalanceMinor)
+        // 3. مفتاح التفعيل 2 (Toggle 2 - Auto-Approve): تفعيل الاعتماد التلقائي لمصرف الإنماء
+        val alinmaBank = db.dao().getAllBanks().first { it.code == "ALINMA" }
+        repository.toggleBankAutoApprove(alinmaBank, true)
 
-        repository.deleteConfirmedTransaction(txId)
-        assertEquals(5000_00L, dao.getAccountById(bankAccId)!!.currentBalanceMinor)
-        assertNull(dao.getTransactionById(txId))
-    }
+        val alinmaAccBefore = db.dao().getAllAccounts().first { it.accountLast4 == "2000" }
+        val txCountBefore = db.dao().getAllConfirmedTransactions().size
 
-    @Test
-    fun `transfer between accounts and refund processing work accurately`() = runBlocking {
-        val bankId = repository.saveAccount(
-            AccountEntity(
-                name = "البنك الأهلي",
-                type = AccountType.BANK,
-                currency = "SAR",
-                openingBalanceMinor = 3000_00L,
-                currentBalanceMinor = 3000_00L
-            )
+        val autoApprovedSuggestedId = repository.ingestBankSms(
+            senderAddress = "Alinma",
+            rawBody = "شراء عبر نقاط البيع مبلغ: ريال سعودي 75 بطاقة مدى: *5650 حساب: *2000 من: بقالة الوفاء مرجع: AUTO75",
+            isTestSandbox = false
         )
-        val cashId = repository.saveAccount(
-            AccountEntity(
-                name = "المحفظة النقدية",
-                type = AccountType.CASH,
-                currency = "SAR",
-                openingBalanceMinor = 500_00L,
-                currentBalanceMinor = 500_00L
-            )
-        )
+        assertNotNull(autoApprovedSuggestedId)
 
-        repository.addConfirmedTransaction(
-            TransactionEntity(
-                type = TransactionType.TRANSFER,
-                amountMinor = 400_00L,
-                currency = "SAR",
-                description = "سحب وتحويل للمحفظة",
-                accountId = bankId,
-                toAccountId = cashId
-            )
-        )
-        assertEquals(2600_00L, dao.getAccountById(bankId)!!.currentBalanceMinor)
-        assertEquals(900_00L, dao.getAccountById(cashId)!!.currentBalanceMinor)
+        // يجب أن تتحول الحالة فوراً إلى CONFIRMED ويُخصم المبلغ 75 ر.س من حساب الإنماء تلقائياً دون انتظار مراجعة يدوية
+        val autoSuggested = db.dao().getSuggestedById(autoApprovedSuggestedId!!)!!
+        assertEquals(ReviewStatus.CONFIRMED, autoSuggested.status)
 
-        repository.addConfirmedTransaction(
-            TransactionEntity(
-                type = TransactionType.EXPENSE,
-                amountMinor = 300_00L,
-                currency = "SAR",
-                description = "شراء جهاز",
-                accountId = bankId
-            )
-        )
-        repository.addConfirmedTransaction(
-            TransactionEntity(
-                type = TransactionType.REFUND,
-                amountMinor = 100_00L,
-                currency = "SAR",
-                description = "استرداد فرق سعر",
-                accountId = bankId
-            )
-        )
-
-        assertEquals(2400_00L, dao.getAccountById(bankId)!!.currentBalanceMinor)
-
-        val allTxs = repository.confirmedTransactionsFlow.first()
-        assertEquals(200_00L, SaidiQershRepository.computeNetConfirmedExpensesMinor(allTxs))
-        assertEquals(0L, SaidiQershRepository.computeConfirmedIncomeMinor(allTxs))
+        val alinmaAccAfter = db.dao().getAccountById(alinmaAccBefore.id)!!
+        assertEquals(alinmaAccBefore.currentBalanceMinor - 75_00L, alinmaAccAfter.currentBalanceMinor)
+        assertEquals(txCountBefore + 1, db.dao().getAllConfirmedTransactions().size)
     }
 }

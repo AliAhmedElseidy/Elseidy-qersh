@@ -14,6 +14,7 @@ data class ParsedSmsResult(
     val matchedBankId: Long?,
     val bankName: String,
     val isBankSmsEnabled: Boolean,
+    val isAutoApproveEnabled: Boolean,
     val suggestedType: SmsSuggestedType,
     val extractedAmountMinor: Long?,
     val currency: String,
@@ -30,10 +31,11 @@ data class ParsedSmsResult(
 )
 
 /**
- * محرك محلي فعلي ومطور لتحليل رسائل البنوك السعودية والمصرية ومحافظ الدفع (Samsung Wallet / Apple Pay / مدى):
- * 1. يدعم العملة قبل الرقم أو بعده، وحرف الياء والألف المقصورة (ريال سعودي / ريال سعودى)، والأرقام الصحيحة أو العشرية.
- * 2. يفلتر تلقائيًا الرسائل غير المالية (تفعيل مستفيد، إضافة مستفيد، رمز التحقق، كود التفعيل، OTP، الرقم السري، تسجيل دخول).
- * 3. يستخرج آخر 4 أرقام من الحساب (*2000) أو البطاقة (*5650) ويربطها تلقائيًا بالحساب المسجل في التطبيق.
+ * محرك محلي فعلي ومطور لتحليل رسائل البنوك والمحافظ (السعودية والمصرية):
+ * 1. الاكتشاف الذكي للمرسل (Dynamic Sender ID Detection): يقرأ اسم المرسل الفعلي (Alinma, AlRajhi, Enjaz, Vodafone, VF-Cash, Urpay, STC Pay, CIB, NBE, Fawry...) دون نسبة الرسائل خطأً للراجحي أو الإنماء.
+ * 2. يدعم العملة قبل الرقم أو بعده، وحرف الياء والألف المقصورة (ريال سعودي / ريال سعودى)، والأرقام الصحيحة أو العشرية.
+ * 3. يفلتر تلقائيًا الرسائل غير المالية (تفعيل مستفيد، إضافة مستفيد، رمز التحقق، كود التفعيل، OTP، الرقم السري، تسجيل دخول).
+ * 4. يستخرج آخر 4 أرقام من الحساب (*2000) أو البطاقة (*5650) ويربطها تلقائيًا بالحساب المسجل في التطبيق.
  */
 object BankSmsParserEngine {
 
@@ -64,14 +66,14 @@ object BankSmsParserEngine {
         Regex("(?:كشف حسابك الشهري جاهز|تم إصدار كشف الحساب|Statement is ready)", RegexOption.IGNORE_CASE)
     )
 
-    // الأنماط المحدثة لاستخراج المبلغ بدقة من جميع الصيغ (بما فيها Samsung Wallet ومصرف الإنماء والراجحي وSNB وCIB)
+    // الأنماط المحدثة لاستخراج المبلغ بدقة من جميع الصيغ (بما فيها Samsung Wallet ومصرف الإنماء والراجحي وEnjaz وVF-Cash وSTC Pay وUrpay)
     private val AMOUNT_PATTERNS_ORDERED = listOf(
         // النمط 1: (مبلغ|المبلغ|بمبلغ) متبوعاً بالعملة (ريال سعودي/سعودى/SAR/ر.س/ج.م...) ثم الرقم
-        Regex("""(?:مبلغ|المبلغ|بمبلغ|قيمة|Amount|Amt)\s*[:\-]?\s*(?:(ريال سعود[ي|ى]|ريال|SAR|SR|ر\.س|جنيه مصر[ي|ى]|جنيه|EGP|LE|ج\.م|USD|\$|AED|د\.إ|KWD|د\.ك))?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:(ريال سعود[ي|ى]|ريال|SAR|SR|ر\.س|جنيه مصر[ي|ى]|جنيه|EGP|LE|ج\.م|USD|\$|AED|د\.إ|KWD|د\.ك))?""", RegexOption.IGNORE_CASE),
-        // النمط 2: العملة أولاً (SAR / ر.س / ريال سعودي / ريال سعودى / ريال / ج.م) ثم الرقم
-        Regex("""(SAR|SR|ر\.س|ريال سعود[ي|ى]|ريال|EGP|LE|ج\.م|جنيه مصر[ي|ى]|جنيه|USD|AED|د\.إ|KWD|د\.ك)\s*[:\-]?\s*([\d,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE),
+        Regex("""(?:مبلغ|المبلغ|بمبلغ|قيمة|Amount|Amt)\s*[:\-]?\s*(?:(ريال سعود[ي|ى]|ريال|SAR|SR|ر\.س|جنيه مصر[ي|ى]|جنيه|جنية|EGP|LE|ج\.م|USD|\$|AED|د\.إ|KWD|د\.ك))?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:(ريال سعود[ي|ى]|ريال|SAR|SR|ر\.س|جنيه مصر[ي|ى]|جنيه|جنية|EGP|LE|ج\.م|USD|\$|AED|د\.إ|KWD|د\.ك))?""", RegexOption.IGNORE_CASE),
+        // النمط 2: العملة أولاً (SAR / ر.س / ريال سعودي / ريال سعودى / ريال / ج.م / جنيه) ثم الرقم
+        Regex("""(SAR|SR|ر\.س|ريال سعود[ي|ى]|ريال|EGP|LE|ج\.م|جنيه مصر[ي|ى]|جنيه|جنية|USD|AED|د\.إ|KWD|د\.ك)\s*[:\-]?\s*([\d,]+(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE),
         // النمط 3: الرقم أولاً ثم العملة
-        Regex("""([\d,]+(?:\.\d{1,2})?)\s*(SAR|SR|ر\.س|ريال سعود[ي|ى]|ريال|EGP|LE|ج\.م|جنيه مصر[ي|ى]|جنيه|USD|AED|د\.إ|KWD|د\.ك)""", RegexOption.IGNORE_CASE)
+        Regex("""([\d,]+(?:\.\d{1,2})?)\s*(SAR|SR|ر\.س|ريال سعود[ي|ى]|ريال|EGP|LE|ج\.م|جنيه مصر[ي|ى]|جنيه|جنية|USD|AED|د\.إ|KWD|د\.ك)""", RegexOption.IGNORE_CASE)
     )
 
     // استخراج آخر 4 أرقام من الحساب (مثال: حساب: *2000 أو حساب *2000 أو Account: *2000)
@@ -107,44 +109,58 @@ object BankSmsParserEngine {
         categories: List<CategoryEntity> = emptyList(),
         accounts: List<AccountEntity> = emptyList()
     ): ParsedSmsResult {
+        val cleanSender = senderAddress.trim()
         val normalizedBody = MoneyUtils.normalizeDigits(rawBody)
-        val messageHash = MoneyUtils.computeMessageHash(senderAddress, normalizedBody)
+        val messageHash = MoneyUtils.computeMessageHash(cleanSender, normalizedBody)
         val sanitizedSnippet = sanitizeSmsForStorage(normalizedBody)
 
-        // استخراج آخر 4 أرقام للحساب والبطاقة ومطابقتها الذكية مع الحسابات المسجلة
+        // استخراج آخر 4 أرقام للحساب والبطاقة
         val extractedAccLast4 = extractAccountLast4(normalizedBody)
         val extractedCardLast4 = extractCardLast4(normalizedBody)
+
+        // 1. التعرف الذكي والدقيق على جهة المرسل (Sender ID) دون إجبار الرسالة على الراجحي أو الإنماء
+        val matchedBank = matchBankStrictly(
+            sender = cleanSender,
+            body = normalizedBody,
+            extractedAccLast4 = extractedAccLast4,
+            extractedCardLast4 = extractedCardLast4,
+            banks = knownBanks
+        )
+
+        // 2. الربط الذكي للحسابات والبطاقات بناءً على آخر 4 أرقام أو البنك الفعلي المطابق
         val smartMatchedAccount = matchAccountByLast4OrBank(
             extractedAccountLast4 = extractedAccLast4,
             extractedCardLast4 = extractedCardLast4,
-            senderAddress = senderAddress,
-            body = normalizedBody,
-            accounts = accounts,
-            knownBanks = knownBanks
+            matchedBank = matchedBank,
+            senderAddress = cleanSender,
+            accounts = accounts
         )
 
-        // 1. التعرف على البنك (من الحساب المطابق ذكيًا أو اسم المرسل أو محتوى الرسالة)
-        val matchedBank = matchBank(senderAddress, normalizedBody, knownBanks)
-            ?: smartMatchedAccount?.bankId?.let { bId -> knownBanks.firstOrNull { it.id == bId } }
-        val bankName = matchedBank?.nameAr
-            ?: smartMatchedAccount?.bankName?.takeIf { it.isNotBlank() }
-            ?: inferBankNameFromText(senderAddress, normalizedBody, extractedAccLast4, extractedCardLast4)
-        val isBankSmsEnabled = matchedBank?.smsEnabled ?: true
-        val defaultCurrency = matchedBank?.defaultCurrency
-            ?: smartMatchedAccount?.currency
-            ?: inferDefaultCurrency(normalizedBody)
+        // اسم الجهة الحقيقي للعرض على الكارت
+        val bankName = resolveSenderDisplayName(
+            sender = cleanSender,
+            body = normalizedBody,
+            matchedBank = matchedBank,
+            accLast4 = extractedAccLast4,
+            cardLast4 = extractedCardLast4
+        )
 
-        // 2. الفلترة التلقائية للرسائل غير المالية (Auto-Ignore Non-Financial SMS)
+        val isBankSmsEnabled = matchedBank?.smsEnabled ?: true
+        val isAutoApproveEnabled = matchedBank?.autoApproveEnabled ?: false
+        val defaultCurrency = inferDefaultCurrency(normalizedBody, matchedBank, cleanSender)
+
+        // 3. الفلترة التلقائية للرسائل غير المالية (Auto-Ignore Non-Financial SMS)
         if (containsAutoIgnoreKeyword(normalizedBody) ||
             (PROMO_OR_NON_TX_PATTERNS.any { it.containsMatchIn(normalizedBody) } &&
                 !containsConfirmedFinancialActionVerb(normalizedBody))
         ) {
             return ParsedSmsResult(
                 messageHash = messageHash,
-                senderAddress = senderAddress,
+                senderAddress = cleanSender,
                 matchedBankId = matchedBank?.id,
                 bankName = bankName,
                 isBankSmsEnabled = isBankSmsEnabled,
+                isAutoApproveEnabled = isAutoApproveEnabled,
                 suggestedType = SmsSuggestedType.BALANCE_NOTICE_ONLY,
                 extractedAmountMinor = null,
                 currency = defaultCurrency,
@@ -161,16 +177,17 @@ object BankSmsParserEngine {
             )
         }
 
-        // 3. فحص رسائل إشعار الرصيد فقط التي لا تمثل معاملة جديدة
+        // 4. فحص رسائل إشعار الرصيد فقط التي لا تمثل معاملة جديدة
         if (BALANCE_ONLY_PATTERNS.any { it.containsMatchIn(normalizedBody.trim()) } ||
             (normalizedBody.contains("الرصيد المتاح") && !containsFinancialMovementKeyword(normalizedBody))
         ) {
             return ParsedSmsResult(
                 messageHash = messageHash,
-                senderAddress = senderAddress,
+                senderAddress = cleanSender,
                 matchedBankId = matchedBank?.id,
                 bankName = bankName,
                 isBankSmsEnabled = isBankSmsEnabled,
+                isAutoApproveEnabled = isAutoApproveEnabled,
                 suggestedType = SmsSuggestedType.BALANCE_NOTICE_ONLY,
                 extractedAmountMinor = null,
                 currency = defaultCurrency,
@@ -187,24 +204,25 @@ object BankSmsParserEngine {
             )
         }
 
-        // 4. تحديد نوع العملية من القواعد المخصصة أو القواعد الذكية الشاملة
+        // 5. تحديد نوع العملية من القواعد المخصصة أو القواعد الذكية الشاملة
         val detectedType = detectOperationType(normalizedBody, matchedBank?.id, customRules)
 
-        // 5. استخراج المبلغ والعملة
+        // 6. استخراج المبلغ والعملة
         val (amountMinor, currency) = extractAmountAndCurrency(normalizedBody, defaultCurrency)
 
-        // 6. استخراج التاجر ورقم المرجع
+        // 7. استخراج التاجر ورقم المرجع
         val referenceNumber = extractReferenceNumber(normalizedBody)
         val merchantName = extractMerchant(normalizedBody, detectedType)
 
-        // 7. إذا لم يمكن استخراج المبلغ أو نوع العملية بثقة -> قائمة غير واضحة (UNCLEAR)
+        // 8. إذا لم يمكن استخراج المبلغ أو نوع العملية بثقة -> قائمة غير واضحة (UNCLEAR)
         if (detectedType == SmsSuggestedType.UNCLEAR || amountMinor == null || amountMinor <= 0L) {
             return ParsedSmsResult(
                 messageHash = messageHash,
-                senderAddress = senderAddress,
+                senderAddress = cleanSender,
                 matchedBankId = matchedBank?.id,
                 bankName = bankName,
                 isBankSmsEnabled = isBankSmsEnabled,
+                isAutoApproveEnabled = isAutoApproveEnabled,
                 suggestedType = SmsSuggestedType.UNCLEAR,
                 extractedAmountMinor = amountMinor,
                 currency = currency,
@@ -221,15 +239,16 @@ object BankSmsParserEngine {
             )
         }
 
-        // 8. اقتراح التصنيف المناسب بناءً على اسم التاجر ونوع العملية
+        // 9. اقتراح التصنيف المناسب بناءً على اسم التاجر ونوع العملية
         val (catId, catName) = suggestCategory(merchantName, normalizedBody, detectedType, categories)
 
         return ParsedSmsResult(
             messageHash = messageHash,
-            senderAddress = senderAddress,
+            senderAddress = cleanSender,
             matchedBankId = matchedBank?.id,
             bankName = bankName,
             isBankSmsEnabled = isBankSmsEnabled,
+            isAutoApproveEnabled = isAutoApproveEnabled,
             suggestedType = detectedType,
             extractedAmountMinor = amountMinor,
             currency = currency,
@@ -267,15 +286,66 @@ object BankSmsParserEngine {
     }
 
     /**
-     * الربط الذكي للحسابات والبطاقات بناءً على آخر 4 أرقام للحساب أو البطاقة، ثم البنك.
+     * مطابقة دقيقة لجهة الرسالة:
+     * 1. تطابق أولاً مع اسم المرسل الفعلي (senderAddress) مباشرة.
+     * 2. إذا لم يكن المرسل معروفاً، تفحص ما إذا كان نص الرسالة يذكر اسم الجهة صراحةً.
+     * 3. إذا كانت الرسالة من محفظة دفع مثل Samsung Wallet وبها حساب *2000 أو بطاقة *5650، تربطها بالبنك المطابق للأرقام.
+     */
+    private fun matchBankStrictly(
+        sender: String,
+        body: String,
+        extractedAccLast4: String,
+        extractedCardLast4: String,
+        banks: List<BankEntity>
+    ): BankEntity? {
+        if (banks.isEmpty()) return null
+        val sLower = sender.trim().lowercase(Locale.ROOT)
+
+        // أولاً: مطابقة اسم المرسل (Sender ID) مباشرة
+        if (sLower.isNotEmpty()) {
+            for (bank in banks) {
+                val tokens = bank.senderIdsCsv.split(",")
+                    .map { it.trim().lowercase(Locale.ROOT) }
+                    .filter { it.isNotEmpty() }
+                if (tokens.any { token -> sLower == token || sLower.contains(token) || token.contains(sLower) && sLower.length >= 3 }) {
+                    return bank
+                }
+            }
+        }
+
+        // ثانياً: إذا لم يتطابق اسم المرسل مع أي جهة معروفة، وكان اسم المرسل واضحاً ومميزاً (مثل Enjaz أو VF-Cash أو Barq)،
+        // لا نقوم بإجباره على بنك آخر إلا إذا كان نص الرسالة نفسه يذكر اسم البنك صراحةً
+        val bLower = body.lowercase(Locale.ROOT)
+        for (bank in banks) {
+            val tokens = bank.senderIdsCsv.split(",")
+                .map { it.trim().lowercase(Locale.ROOT) }
+                .filter { it.length >= 3 }
+            if (tokens.any { token -> bLower.contains(token) }) {
+                return bank
+            }
+        }
+
+        // ثالثاً: في حال كانت الرسالة من Samsung Wallet أو Apple Pay وتحتوي على حساب *2000 أو بطاقة *5650
+        if (extractedAccLast4 == "2000" || extractedCardLast4 == "5650") {
+            return banks.firstOrNull { it.code.equals("ALINMA", ignoreCase = true) }
+        }
+        if (extractedAccLast4 == "4821" || extractedCardLast4 == "4821") {
+            return banks.firstOrNull { it.code.equals("ALRAJHI", ignoreCase = true) }
+        }
+
+        return null
+    }
+
+    /**
+     * الربط الذكي للحسابات والبطاقات بناءً على آخر 4 أرقام للحساب أو البطاقة، ثم البنك الفعلي المطابق فقط.
+     * لا ينسب الرسالة قسراً لحساب الإنماء أو الراجحي إذا كانت من جهة أخرى!
      */
     fun matchAccountByLast4OrBank(
         extractedAccountLast4: String,
         extractedCardLast4: String,
+        matchedBank: BankEntity?,
         senderAddress: String,
-        body: String,
-        accounts: List<AccountEntity>,
-        knownBanks: List<BankEntity>
+        accounts: List<AccountEntity>
     ): AccountEntity? {
         if (accounts.isEmpty()) return null
 
@@ -295,74 +365,117 @@ object BankSmsParserEngine {
             if (byCardLast4 != null) return byCardLast4
         }
 
-        // 3. مطابقة بناءً على البنك المكتشف
-        val bank = matchBank(senderAddress, body, knownBanks)
-        if (bank != null) {
-            val byBankId = accounts.firstOrNull { it.bankId == bank.id && it.smsParsingEnabled }
-                ?: accounts.firstOrNull { it.bankName.contains(bank.nameAr.take(6)) }
+        // 3. مطابقة بناءً على البنك الفعلي المكتشف
+        if (matchedBank != null) {
+            val byBankId = accounts.firstOrNull { it.bankId == matchedBank.id && it.smsParsingEnabled }
+                ?: accounts.firstOrNull {
+                    it.smsParsingEnabled && (
+                        it.bankName.contains(matchedBank.nameAr.take(6), ignoreCase = true) ||
+                            it.name.contains(matchedBank.nameEn.take(5), ignoreCase = true) ||
+                            it.name.contains(matchedBank.code, ignoreCase = true)
+                        )
+                }
             if (byBankId != null) return byBankId
         }
 
-        // 4. إذا كانت الرسالة تحتوي على حساب *2000 أو بطاقة *5650 (الخاصة بمصرف الإنماء غالبًا)
+        // 4. مطابقة اسم الحساب مباشرة مع اسم المرسل (مثل حساب فودافون كاش أو حساب Urpay أو STC Pay)
+        if (senderAddress.isNotBlank()) {
+            val bySenderName = accounts.firstOrNull { acc ->
+                acc.name.contains(senderAddress, ignoreCase = true) ||
+                    acc.bankName.contains(senderAddress, ignoreCase = true)
+            }
+            if (bySenderName != null) return bySenderName
+        }
+
+        // 5. إذا كانت الرسالة تحتوي على حساب *2000 أو بطاقة *5650
         if (extractedAccountLast4 == "2000" || extractedCardLast4 == "5650") {
-            val alinmaAcc = accounts.firstOrNull { it.name.contains("الإنماء") || it.name.contains("الانماء") || it.bankName.contains("الإنماء") }
+            val alinmaAcc = accounts.firstOrNull {
+                it.name.contains("الإنماء") || it.name.contains("الانماء") || it.bankName.contains("الإنماء")
+            }
             if (alinmaAcc != null) return alinmaAcc
         }
 
-        return accounts.firstOrNull { it.smsParsingEnabled }
-    }
-
-    private fun matchBank(sender: String, body: String, banks: List<BankEntity>): BankEntity? {
-        val sLower = sender.lowercase(Locale.ROOT)
-        val bLower = body.lowercase(Locale.ROOT)
-        for (bank in banks) {
-            val tokens = bank.senderIdsCsv.split(",")
-                .map { it.trim().lowercase(Locale.ROOT) }
-                .filter { it.isNotEmpty() }
-            if (tokens.any { sLower.contains(it) || bLower.contains(it) }) {
-                return bank
-            }
-        }
         return null
     }
 
-    private fun inferBankNameFromText(
+    /**
+     * يستخرج الاسم الحقيقي لجهة الرسالة (Sender ID) لعرضه على الكارت دون افتراض خاطئ للراجحي أو الإنماء.
+     */
+    fun resolveSenderDisplayName(
         sender: String,
         body: String,
-        accLast4: String,
-        cardLast4: String
+        matchedBank: BankEntity?,
+        accLast4: String = "",
+        cardLast4: String = ""
     ): String {
-        val combined = "$sender $body"
+        val cleanSender = sender.trim()
+        val sLower = cleanSender.lowercase(Locale.ROOT)
+        val bLower = body.lowercase(Locale.ROOT)
+
+        if (matchedBank != null) {
+            return matchedBank.nameAr
+        }
+
+        // فحص الجهات الشهيرة بناءً على اسم المرسل الفعلي عند عدم وجودها في جدول البنوك
         return when {
-            combined.contains("الإنماء", ignoreCase = true) || combined.contains("الانماء", ignoreCase = true) || combined.contains("Alinma", ignoreCase = true) || accLast4 == "2000" || cardLast4 == "5650" -> "مصرف الإنماء"
-            combined.contains("الراجحي", ignoreCase = true) || combined.contains("AlRajhi", ignoreCase = true) -> "مصرف الراجحي"
-            combined.contains("SNB", ignoreCase = true) || combined.contains("الأهلي السعودي", ignoreCase = true) || combined.contains("AlAhli", ignoreCase = true) -> "البنك الأهلي السعودي (SNB)"
-            combined.contains("بنك الرياض", ignoreCase = true) || combined.contains("Riyad", ignoreCase = true) -> "بنك الرياض"
-            combined.contains("SAB", ignoreCase = true) || combined.contains("الأول", ignoreCase = true) -> "البنك السعودي الأول (SAB)"
-            combined.contains("CIB", ignoreCase = true) -> "البنك التجاري الدولي (CIB)"
-            combined.contains("NBE", ignoreCase = true) || combined.contains("الأهلي المصري", ignoreCase = true) -> "البنك الأهلي المصري (NBE)"
-            combined.contains("Samsung Wallet", ignoreCase = true) || combined.contains("Apple Pay", ignoreCase = true) -> "مصرف الإنماء"
-            sender.isNotBlank() -> sender
-            else -> "بنك غير محدد"
+            sLower.contains("enjaz") || cleanSender.contains("إنجاز") || cleanSender.contains("انجاز") || bLower.contains("enjaz") || body.contains("إنجاز") ->
+                "إنجاز (Enjaz)"
+            sLower.contains("vf-cash") || sLower.contains("vfcash") || sLower.contains("vodafone") || cleanSender.contains("فودافون") || body.contains("فودافون كاش") ->
+                "فودافون كاش (VF-Cash)"
+            sLower.contains("urpay") || cleanSender.contains("يورباي") || bLower.contains("urpay") ->
+                "Urpay (يورباي)"
+            sLower.contains("stc") || cleanSender.contains("اس تي سي") || cleanSender.contains("إس تي سي") || bLower.contains("stc pay") || bLower.contains("stcpay") ->
+                "STC Pay"
+            sLower.contains("fawry") || cleanSender.contains("فوري") || bLower.contains("fawry") ->
+                "فوري (Fawry)"
+            sLower.contains("instapay") || cleanSender.contains("انستاباي") || bLower.contains("instapay") ->
+                "InstaPay (إنستاباي)"
+            sLower.contains("cib") || bLower.contains("cib") ->
+                "البنك التجاري الدولي (CIB)"
+            sLower.contains("nbe") || cleanSender.contains("الأهلي المصري") || body.contains("الأهلي المصري") ->
+                "البنك الأهلي المصري (NBE)"
+            sLower.contains("alinma") || cleanSender.contains("الإنماء") || cleanSender.contains("الانماء") ->
+                "مصرف الإنماء"
+            sLower.contains("rajhi") || cleanSender.contains("الراجحي") ->
+                "مصرف الراجحي"
+            sLower.contains("snb") || sLower.contains("alahli") || cleanSender.contains("الأهلي") ->
+                "البنك الأهلي السعودي (SNB)"
+            sLower.contains("riyad") || cleanSender.contains("الرياض") ->
+                "بنك الرياض"
+            sLower.contains("sab") || cleanSender.contains("الأول") ->
+                "البنك السعودي الأول (SAB)"
+            (accLast4 == "2000" || cardLast4 == "5650") && (cleanSender.isBlank() || sLower.contains("samsung") || sLower.contains("wallet")) ->
+                "مصرف الإنماء"
+            cleanSender.isNotBlank() && !cleanSender.equals("Unknown", ignoreCase = true) ->
+                cleanSender
+            bLower.contains("samsung wallet") -> "Samsung Wallet"
+            bLower.contains("apple pay") -> "Apple Pay"
+            else -> "جهة مالية غير محددة"
         }
     }
 
-    private fun inferDefaultCurrency(body: String): String {
+    private fun inferDefaultCurrency(body: String, matchedBank: BankEntity?, sender: String): String {
+        val combined = "$sender $body"
         return when {
-            body.contains("ج.م") || body.contains("جنيه") || body.contains("EGP", ignoreCase = true) -> "EGP"
-            body.contains("د.إ") || body.contains("AED", ignoreCase = true) -> "AED"
-            body.contains("USD", ignoreCase = true) || body.contains("$") -> "USD"
+            combined.contains("ج.م") || combined.contains("جنيه") || combined.contains("جنية") ||
+                combined.contains("EGP", ignoreCase = true) ||
+                combined.contains("VF-Cash", ignoreCase = true) ||
+                combined.contains("Vodafone", ignoreCase = true) ||
+                combined.contains("Fawry", ignoreCase = true) -> "EGP"
+            combined.contains("د.إ") || combined.contains("AED", ignoreCase = true) -> "AED"
+            combined.contains("USD", ignoreCase = true) || combined.contains("$") -> "USD"
+            matchedBank != null -> matchedBank.defaultCurrency
             else -> "SAR"
         }
     }
 
     private fun containsConfirmedFinancialActionVerb(body: String): Boolean {
-        return Regex("(?:شراء|سحب|حوالة|تحويل|إيداع|ايداع|استرداد|سداد فاتورة|PoS|Purchase|Withdrawal|Transfer|Refund)", RegexOption.IGNORE_CASE)
+        return Regex("(?:شراء|سحب|حوالة|تحويل|إيداع|ايداع|استرداد|سداد فاتورة|تم خصم|تم استلام|PoS|Purchase|Withdrawal|Transfer|Refund)", RegexOption.IGNORE_CASE)
             .containsMatchIn(body)
     }
 
     private fun containsFinancialMovementKeyword(body: String): Boolean {
-        return Regex("(?:شراء|سحب|حوالة|تحويل|إيداع|ايداع|استرداد|عكس عملية|سداد|Purchase|Withdrawal|Transfer|Deposit|Refund|Bill|POS|ATM)", RegexOption.IGNORE_CASE)
+        return Regex("(?:شراء|سحب|حوالة|تحويل|إيداع|ايداع|استرداد|عكس عملية|سداد|تم خصم|تم استلام|Purchase|Withdrawal|Transfer|Deposit|Refund|Bill|POS|ATM)", RegexOption.IGNORE_CASE)
             .containsMatchIn(body)
     }
 
@@ -377,22 +490,24 @@ object BankSmsParserEngine {
         if (Regex("(?:سداد بطاقة|سداد مستحقات البطاقة|دفعة بطاقة ائتمانية|Credit Card Payment|Card Settlement)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
             return SmsSuggestedType.CREDIT_CARD_SETTLEMENT
         }
-        if (Regex("(?:سداد فاتورة|دفع فاتورة|فاتورة سداد|SADAD|Bill Payment)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
+        if (Regex("(?:سداد فاتورة|دفع فاتورة|فاتورة سداد|SADAD|Bill Payment|فوري|Fawry)", RegexOption.IGNORE_CASE).containsMatchIn(body) &&
+            !Regex("(?:إيداع|حوالة واردة)", RegexOption.IGNORE_CASE).containsMatchIn(body)
+        ) {
             return SmsSuggestedType.BILL_PAYMENT
         }
-        if (Regex("(?:سحب نقدي|سحب صراف|صراف آلي|ATM Withdrawal|Cash Withdrawal|سحب: صراف)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
+        if (Regex("(?:سحب نقدي|سحب صراف|صراف آلي|ATM Withdrawal|Cash Withdrawal|سحب: صراف|تم سحب)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
             return SmsSuggestedType.ATM_WITHDRAWAL
         }
-        if (Regex("(?:حوالة واردة|تحويل وارد|حوالة محلية واردة|Incoming Transfer|Credit Transfer|تم إضافة مبلغ حوالة)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
+        if (Regex("(?:حوالة واردة|تحويل وارد|حوالة محلية واردة|تم استلام مبلغ|تم ايداع|Incoming Transfer|Credit Transfer|تم إضافة مبلغ حوالة)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
             return SmsSuggestedType.INCOMING_TRANSFER
         }
         if (Regex("(?:إيداع نقدي|ايداع نقدي|إيداع راتب|إيداع في حسابك|Cash Deposit|Salary Deposit|Salary Credit)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
             return SmsSuggestedType.DEPOSIT
         }
-        if (Regex("(?:حوالة صادرة|تحويل صادر|حوالة محلية صادرة|حوالة داخلية صادرة|Outgoing Transfer|Transfer to)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
+        if (Regex("(?:حوالة صادرة|تحويل صادر|حوالة محلية صادرة|حوالة دولية|تم تحويل مبلغ|تم تحويل|حوالة عبر إنجاز|Outgoing Transfer|Transfer to)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
             return SmsSuggestedType.OUTGOING_TRANSFER
         }
-        if (Regex("(?:شراء|شراء عبر|نقاط البيع|شراء انترنت|شراء أثير|مدى-أثير|عملية شراء|بطاقة مدى|Samsung Wallet|Apple Pay|PoS Purchase|POS|Online Purchase|Card Purchase)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
+        if (Regex("(?:شراء|شراء عبر|نقاط البيع|شراء انترنت|شراء أثير|مدى-أثير|عملية شراء|بطاقة مدى|تم خصم|Samsung Wallet|Apple Pay|PoS Purchase|POS|Online Purchase|Card Purchase)", RegexOption.IGNORE_CASE).containsMatchIn(body)) {
             return SmsSuggestedType.CARD_PURCHASE
         }
 
@@ -462,7 +577,7 @@ object BankSmsParserEngine {
         return when {
             c.isEmpty() -> fallback
             c in listOf("SAR", "SR", "ر.س", "ريال", "ريال سعودي", "ريال سعودى") -> "SAR"
-            c in listOf("EGP", "LE", "ج.م", "جنيه", "جنيه مصري", "جنيه مصرى") -> "EGP"
+            c in listOf("EGP", "LE", "ج.م", "جنيه", "جنية", "جنيه مصري", "جنيه مصرى") -> "EGP"
             c in listOf("AED", "د.إ") -> "AED"
             c in listOf("KWD", "د.ك") -> "KWD"
             c in listOf("USD", "$") -> "USD"
@@ -487,6 +602,8 @@ object BankSmsParserEngine {
             SmsSuggestedType.BILL_PAYMENT -> "سداد فاتورة"
             SmsSuggestedType.CREDIT_CARD_SETTLEMENT -> "سداد البطاقة الائتمانية"
             SmsSuggestedType.DEPOSIT -> "إيداع بنكي"
+            SmsSuggestedType.OUTGOING_TRANSFER -> "حوالة صادرة"
+            SmsSuggestedType.INCOMING_TRANSFER -> "حوالة واردة"
             else -> ""
         }
     }
@@ -511,7 +628,7 @@ object BankSmsParserEngine {
         val text = "$merchantName $body".lowercase(Locale.ROOT)
         val targetName = when {
             type == SmsSuggestedType.DEPOSIT || type == SmsSuggestedType.INCOMING_TRANSFER -> "أخرى"
-            type == SmsSuggestedType.BILL_PAYMENT || text.contains("كهرباء") || text.contains("مياه") || text.contains("stc") || text.contains("موبايلي") || text.contains("زين") -> "فواتير"
+            type == SmsSuggestedType.BILL_PAYMENT || text.contains("كهرباء") || text.contains("مياه") || text.contains("stc") || text.contains("موبايلي") || text.contains("زين") || text.contains("فوري") || text.contains("fawry") -> "فواتير"
             text.contains("بنزين") || text.contains("وقود") || text.contains("الدريس") || text.contains("ساسكو") || text.contains("نفط") || text.contains("petromin") -> "بنزين"
             text.contains("أوبر") || text.contains("uber") || text.contains("كريم") || text.contains("قطار") || text.contains("تاكسي") -> "مواصلات"
             text.contains("بندة") || text.contains("العثيم") || text.contains("الدانوب") || text.contains("تميمي") || text.contains("كارفور") || text.contains("سوبرماركت") || text.contains("بقالة") || text.contains("لولو") -> "بقالة"

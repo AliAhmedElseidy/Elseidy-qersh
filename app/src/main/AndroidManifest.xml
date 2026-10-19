@@ -7,7 +7,7 @@
     <uses-permission android:name="android.permission.READ_SMS" />
     <!-- صلاحية الميكروفون الاختيارية لإملاء المصروفات صوتيًا بالعربية -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- صلاحية التنبيهات المحلية للتذكير بالأقساط والالتزامات وتجاوز الميزانية -->
+    <!-- صلاحية الإشعارات الفورية للعمليات البنكية وتنبيهات الميزانية والالتزامات -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature
@@ -38,7 +38,7 @@
             </intent-filter>
         </activity>
 
-        <!-- مستقبل الرسائل البنكية في الخلفية لتحويل الإشعارات البنكية إلى مقترحات للمراجعة -->
+        <!-- مستقبل الرسائل البنكية في الخلفية وأزرار الإشعارات التفاعلية (أضف | تجاهل) -->
         <receiver
             android:name=".receivers.BankSmsBroadcastReceiver"
             android:enabled="true"
@@ -46,6 +46,10 @@
             android:permission="android.permission.BROADCAST_SMS">
             <intent-filter android:priority="999">
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.example.action.APPROVE_SMS_NOTIFICATION" />
+                <action android:name="com.example.action.IGNORE_SMS_NOTIFICATION" />
             </intent-filter>
         </receiver>
     </application>

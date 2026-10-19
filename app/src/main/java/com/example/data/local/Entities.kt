@@ -75,7 +75,9 @@ class RoomTypeConverters {
 }
 
 /**
- * 1. كيان البنوك المدعومة وقابلة للتوسعة
+ * 1. كيان جهات الرسائل والبنوك المدعومة والمكتشفة ديناميكياً:
+ * - smsEnabled (Toggle 1): قراءة رسائل هذه الجهة (مفعّل / معطّل)
+ * - autoApproveEnabled (Toggle 2 - ميزة مستقلة): اعتماد وتسجيل تلقائي فوري (Auto-Approve)
  */
 @Entity(
     tableName = "banks",
@@ -89,7 +91,8 @@ data class BankEntity(
     val country: String = "SA",
     val defaultCurrency: String = "SAR",
     val senderIdsCsv: String,
-    val smsEnabled: Boolean = true
+    val smsEnabled: Boolean = true,
+    val autoApproveEnabled: Boolean = false
 )
 
 /**

@@ -5,6 +5,8 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.domain.MoneyUtils
 
 @Database(
@@ -24,7 +26,7 @@ import com.example.domain.MoneyUtils
         ShoppingItemEntity::class,
         ImportAuditLogEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(RoomTypeConverters::class)
@@ -35,13 +37,21 @@ abstract class SaidiQershDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: SaidiQershDatabase? = null
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE banks ADD COLUMN autoApproveEnabled INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(context: Context): SaidiQershDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     SaidiQershDatabase::class.java,
                     "saidi_qersh_local.db"
-                ).fallbackToDestructiveMigration(true)
+                )
+                    .addMigrations(MIGRATION_2_3)
+                    .fallbackToDestructiveMigration(true)
                     .build()
                 INSTANCE = instance
                 instance
@@ -49,89 +59,158 @@ abstract class SaidiQershDatabase : RoomDatabase() {
         }
 
         /**
-         * يجهز البيانات التأسيسية للبنوك والتصنيفات الـ 16 الجديدة والحسابات الافتراضية (حساب الإنماء *2000، حساب الراجحي *4821، المحفظة النقدية).
+         * يجهز البيانات التأسيسية لجهات الرسائل المستقلة (Alinma, AlRajhi, Enjaz, Urpay, STC Pay, VF-Cash, Fawry, SNB, CIB, NBE...)
+         * والتصنيفات الـ 16 الجديدة والحسابات الافتراضية دون خلط بين الجهات.
          */
         suspend fun seedInitialDataIfEmpty(dao: SaidiQershDao) {
-            if (dao.getAllBanks().isEmpty()) {
-                val alinmaId = dao.insertBank(
-                    BankEntity(
-                        nameAr = "مصرف الإنماء",
-                        nameEn = "Alinma Bank",
-                        code = "ALINMA",
-                        country = "SA",
-                        defaultCurrency = "SAR",
-                        senderIdsCsv = "Alinma,AlinmaBank,الإنماء,الانماء,مصرف الإنماء",
-                        smsEnabled = true
-                    )
-                )
-                val alRajhiId = dao.insertBank(
-                    BankEntity(
-                        nameAr = "مصرف الراجحي",
-                        nameEn = "Al Rajhi Bank",
-                        code = "ALRAJHI",
-                        country = "SA",
-                        defaultCurrency = "SAR",
-                        senderIdsCsv = "AlRajhiBank,ALRAJHI,مصرف الراجحي,Urpay",
-                        smsEnabled = true
-                    )
-                )
-                val snbId = dao.insertBank(
-                    BankEntity(
-                        nameAr = "البنك الأهلي السعودي (SNB)",
-                        nameEn = "Saudi National Bank",
-                        code = "SNB",
-                        country = "SA",
-                        defaultCurrency = "SAR",
-                        senderIdsCsv = "SNB,SNB AlAhli,AlAhli,الأهلي,الاهلي",
-                        smsEnabled = true
-                    )
-                )
-                val riyadId = dao.insertBank(
-                    BankEntity(
-                        nameAr = "بنك الرياض",
-                        nameEn = "Riyad Bank",
-                        code = "RIYAD",
-                        country = "SA",
-                        defaultCurrency = "SAR",
-                        senderIdsCsv = "RiyadBank,Riyad,بنك الرياض",
-                        smsEnabled = true
-                    )
-                )
-                dao.insertBank(
-                    BankEntity(
-                        nameAr = "البنك السعودي الأول (SAB)",
-                        nameEn = "Saudi Awwal Bank",
-                        code = "SAB",
-                        country = "SA",
-                        defaultCurrency = "SAR",
-                        senderIdsCsv = "SAB,SABB,الأول",
-                        smsEnabled = true
-                    )
-                )
-                dao.insertBank(
-                    BankEntity(
-                        nameAr = "البنك الأهلي المصري (NBE)",
-                        nameEn = "National Bank of Egypt",
-                        code = "NBE",
-                        country = "EG",
-                        defaultCurrency = "EGP",
-                        senderIdsCsv = "NBE,AlAhly,البنك الأهلي المصري",
-                        smsEnabled = true
-                    )
-                )
-                dao.insertBank(
-                    BankEntity(
-                        nameAr = "البنك التجاري الدولي (CIB)",
-                        nameEn = "CIB Egypt",
-                        code = "CIB",
-                        country = "EG",
-                        defaultCurrency = "EGP",
-                        senderIdsCsv = "CIB,CIB Egypt",
-                        smsEnabled = true
-                    )
-                )
+            val existingBanks = dao.getAllBanks()
 
-                // قواعد رسائل افتراضية قابلة للتوسعة
+            // تنظيف أي خلط سابق بين Urpay والراجحي في قواعد البيانات المرقاة
+            existingBanks.firstOrNull { it.code == "ALRAJHI" && it.senderIdsCsv.contains("Urpay", ignoreCase = true) }?.let { rajhi ->
+                dao.updateBank(
+                    rajhi.copy(
+                        senderIdsCsv = "AlRajhiBank,ALRAJHI,AlRajhi,مصرف الراجحي,الراجحي"
+                    )
+                )
+            }
+
+            val defaultSenders = listOf(
+                BankEntity(
+                    nameAr = "مصرف الإنماء (Alinma)",
+                    nameEn = "Alinma Bank",
+                    code = "ALINMA",
+                    country = "SA",
+                    defaultCurrency = "SAR",
+                    senderIdsCsv = "Alinma,AlinmaBank,الإنماء,الانماء,مصرف الإنماء",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "مصرف الراجحي (AlRajhi)",
+                    nameEn = "Al Rajhi Bank",
+                    code = "ALRAJHI",
+                    country = "SA",
+                    defaultCurrency = "SAR",
+                    senderIdsCsv = "AlRajhiBank,ALRAJHI,AlRajhi,مصرف الراجحي,الراجحي",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "إنجاز (Enjaz)",
+                    nameEn = "Enjaz",
+                    code = "ENJAZ",
+                    country = "SA",
+                    defaultCurrency = "SAR",
+                    senderIdsCsv = "Enjaz,ENJAZ,EnjazPay,إنجاز,انجاز,بنك البلاد إنجاز",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "Urpay (يورباي)",
+                    nameEn = "Urpay",
+                    code = "URPAY",
+                    country = "SA",
+                    defaultCurrency = "SAR",
+                    senderIdsCsv = "Urpay,URPAY,يورباي",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "STC Pay (إس تي سي باي)",
+                    nameEn = "STC Pay",
+                    code = "STCPAY",
+                    country = "SA",
+                    defaultCurrency = "SAR",
+                    senderIdsCsv = "STC Pay,STCPAY,stcpay,STC Bank,اس تي سي باي,إس تي سي باي",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "فودافون كاش (VF-Cash)",
+                    nameEn = "Vodafone Cash",
+                    code = "VFCASH",
+                    country = "EG",
+                    defaultCurrency = "EGP",
+                    senderIdsCsv = "VF-Cash,VFCash,Vodafone,VodafoneCash,فودافون كاش",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "فوري (Fawry)",
+                    nameEn = "Fawry",
+                    code = "FAWRY",
+                    country = "EG",
+                    defaultCurrency = "EGP",
+                    senderIdsCsv = "Fawry,FAWRY,myFawry,فوري",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "البنك الأهلي السعودي (SNB)",
+                    nameEn = "Saudi National Bank",
+                    code = "SNB",
+                    country = "SA",
+                    defaultCurrency = "SAR",
+                    senderIdsCsv = "SNB,SNB AlAhli,AlAhli,الأهلي السعودي",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "بنك الرياض",
+                    nameEn = "Riyad Bank",
+                    code = "RIYAD",
+                    country = "SA",
+                    defaultCurrency = "SAR",
+                    senderIdsCsv = "RiyadBank,Riyad,بنك الرياض",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "البنك السعودي الأول (SAB)",
+                    nameEn = "Saudi Awwal Bank",
+                    code = "SAB",
+                    country = "SA",
+                    defaultCurrency = "SAR",
+                    senderIdsCsv = "SAB,SABB,البنك الأول",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "البنك الأهلي المصري (NBE)",
+                    nameEn = "National Bank of Egypt",
+                    code = "NBE",
+                    country = "EG",
+                    defaultCurrency = "EGP",
+                    senderIdsCsv = "NBE,AlAhly,البنك الأهلي المصري",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                ),
+                BankEntity(
+                    nameAr = "البنك التجاري الدولي (CIB)",
+                    nameEn = "CIB Egypt",
+                    code = "CIB",
+                    country = "EG",
+                    defaultCurrency = "EGP",
+                    senderIdsCsv = "CIB,CIB Egypt",
+                    smsEnabled = true,
+                    autoApproveEnabled = false
+                )
+            )
+
+            val existingCodes = existingBanks.map { it.code.uppercase() }.toSet()
+            for (bank in defaultSenders) {
+                if (bank.code.uppercase() !in existingCodes) {
+                    dao.insertBank(bank)
+                }
+            }
+
+            if (dao.getActiveSmsRules().isEmpty()) {
+                val allBanks = dao.getAllBanks()
+                val alinmaId = allBanks.firstOrNull { it.code == "ALINMA" }?.id ?: 1L
+                val alRajhiId = allBanks.firstOrNull { it.code == "ALRAJHI" }?.id ?: 2L
+                val snbId = allBanks.firstOrNull { it.code == "SNB" }?.id ?: 3L
+                val riyadId = allBanks.firstOrNull { it.code == "RIYAD" }?.id ?: 4L
+
                 dao.insertSmsRule(
                     SmsRuleEntity(
                         bankId = alinmaId,
@@ -233,7 +312,7 @@ abstract class SaidiQershDatabase : RoomDatabase() {
                         name = "حساب الإنماء",
                         type = AccountType.BANK,
                         bankId = alinma?.id,
-                        bankName = alinma?.nameAr ?: "مصرف الإنماء",
+                        bankName = "مصرف الإنماء",
                         currency = "SAR",
                         openingBalanceMinor = 0L,
                         currentBalanceMinor = 0L,
@@ -247,7 +326,7 @@ abstract class SaidiQershDatabase : RoomDatabase() {
                         name = "حساب الراجحي",
                         type = AccountType.BANK,
                         bankId = rajhi?.id,
-                        bankName = rajhi?.nameAr ?: "مصرف الراجحي",
+                        bankName = "مصرف الراجحي",
                         currency = "SAR",
                         openingBalanceMinor = 0L,
                         currentBalanceMinor = 0L,

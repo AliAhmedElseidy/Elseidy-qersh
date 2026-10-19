@@ -6,11 +6,14 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -29,6 +32,7 @@ import com.example.data.local.TransactionEntity
 import com.example.data.local.TransactionSource
 import com.example.data.local.TransactionType
 import com.example.data.repository.SaidiQershRepository
+import com.example.domain.MoneyUtils
 import com.example.ui.SaidiQershViewModel
 import com.example.ui.components.SaidiQershWalletLogo
 import com.example.ui.screens.*
@@ -58,13 +62,23 @@ class MainActivity : ComponentActivity() {
         val repository = SaidiQershRepository(db.dao())
         ObligationReminderWorker.schedulePeriodicReminders(applicationContext)
 
+        val openTabExtra = intent?.getStringExtra("open_tab")
+        val initialTab = if (openTabExtra == "SMS_REVIEW") {
+            MainDestination.SMS_REVIEW
+        } else {
+            MainDestination.DASHBOARD
+        }
+
         setContent {
             val vm: SaidiQershViewModel = viewModel(factory = SaidiQershViewModel.Factory(repository))
             val darkPref by vm.isDarkModePreferred.collectAsStateWithLifecycle()
             val isDark = darkPref ?: isSystemInDarkTheme()
 
             SaidiQershTheme(darkTheme = isDark) {
-                SaidiQershAppRoot(viewModel = vm)
+                SaidiQershAppRoot(
+                    viewModel = vm,
+                    initialDestination = initialTab
+                )
             }
         }
     }
@@ -73,10 +87,12 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SaidiQershAppRoot(
-    viewModel: SaidiQershViewModel
+    viewModel: SaidiQershViewModel,
+    initialDestination: MainDestination = MainDestination.DASHBOARD
 ) {
     val context = LocalContext.current
     val summary by viewModel.dashboardSummary.collectAsStateWithLifecycle()
+    val selectedYearMonth by viewModel.selectedYearMonth.collectAsStateWithLifecycle()
     val allTransactions by viewModel.allConfirmedTransactions.collectAsStateWithLifecycle()
     val filteredTransactions by viewModel.filteredTransactions.collectAsStateWithLifecycle()
     val filterState by viewModel.filterState.collectAsStateWithLifecycle()
@@ -84,7 +100,7 @@ fun SaidiQershAppRoot(
     val banks by viewModel.banks.collectAsStateWithLifecycle()
     val smsRules by viewModel.smsRules.collectAsStateWithLifecycle()
     val categories by viewModel.categories.collectAsStateWithLifecycle()
-    val suggestedTransactions by viewModel.suggestedTransactions.collectAsStateWithLifecycle()
+    val monthlySuggestedTransactions by viewModel.monthlySuggestedTransactions.collectAsStateWithLifecycle()
     val budgets by viewModel.budgets.collectAsStateWithLifecycle()
     val obligations by viewModel.obligations.collectAsStateWithLifecycle()
     val savingsGoals by viewModel.savingsGoals.collectAsStateWithLifecycle()
@@ -97,7 +113,7 @@ fun SaidiQershAppRoot(
     val isUnlocked by viewModel.isAppUnlocked.collectAsStateWithLifecycle()
     val isDarkModePreferred by viewModel.isDarkModePreferred.collectAsStateWithLifecycle()
 
-    var currentTab by remember { mutableStateOf(MainDestination.DASHBOARD) }
+    var currentTab by remember { mutableStateOf(initialDestination) }
     var showSmartActionSheet by remember { mutableStateOf(false) }
     var showTransactionDialog by remember { mutableStateOf(false) }
     var dialogInitialTxType by remember { mutableStateOf(TransactionType.EXPENSE) }
@@ -260,13 +276,21 @@ fun SaidiQershAppRoot(
                 }
 
                 Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    // شريط اختيار الشهر والسنة المستقل في أعلى التطبيق (< أكتوبر 2026 >)
+                    MonthlyScopeBar(
+                        selectedYearMonth = selectedYearMonth,
+                        onPreviousMonth = { viewModel.selectPreviousMonth() },
+                        onNextMonth = { viewModel.selectNextMonth() },
+                        onResetCurrentMonth = { viewModel.resetToCurrentMonth() }
+                    )
+
                     AnimatedVisibility(visible = statusBanner != null) {
                         statusBanner?.let { msg ->
                             Surface(
                                 color = MaterialTheme.colorScheme.secondaryContainer,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                                    .padding(horizontal = 16.dp, vertical = 4.dp),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
                                 Row(
@@ -298,7 +322,7 @@ fun SaidiQershAppRoot(
                         MainDestination.DASHBOARD -> {
                             DashboardScreen(
                                 summary = summary,
-                                recentTransactions = allTransactions,
+                                recentTransactions = filteredTransactions,
                                 accounts = accounts,
                                 categories = categories,
                                 onQuickAddClick = { txType ->
@@ -350,7 +374,8 @@ fun SaidiQershAppRoot(
                         }
                         MainDestination.SMS_REVIEW -> {
                             SmsReviewScreen(
-                                suggestedTransactions = suggestedTransactions,
+                                selectedYearMonth = selectedYearMonth,
+                                suggestedTransactions = monthlySuggestedTransactions,
                                 banks = banks,
                                 smsRules = smsRules,
                                 accounts = accounts,
@@ -362,6 +387,7 @@ fun SaidiQershAppRoot(
                                 onIgnoreSuggested = { viewModel.ignoreSuggested(it) },
                                 onMarkDuplicate = { viewModel.markSuggestedDuplicate(it) },
                                 onToggleBankSms = { bank, en -> viewModel.toggleBankSms(bank, en) },
+                                onToggleBankAutoApprove = { bank, auto -> viewModel.toggleBankAutoApprove(bank, auto) },
                                 onAddCustomBank = { nAr, code, cur, senders ->
                                     viewModel.addCustomBank(nAr, code, cur, senders)
                                 },
@@ -561,6 +587,98 @@ fun SaidiQershAppRoot(
                 showVoiceDialog = false
             }
         )
+    }
+}
+
+/**
+ * ثالثاً: شريط اختيار الشهر والسنة المستقل في أعلى التطبيق (مثال: < أكتوبر 2026 >)
+ * بحيث يكون كل شهر مستقلاً تماماً بعملياته، ومصروفاته، ودخله، ورسائله البنكية.
+ */
+@Composable
+fun MonthlyScopeBar(
+    selectedYearMonth: String,
+    onPreviousMonth: () -> Unit,
+    onNextMonth: () -> Unit,
+    onResetCurrentMonth: () -> Unit
+) {
+    val currentYm = remember { MoneyUtils.currentYearMonth() }
+    val monthTitleAr = remember(selectedYearMonth) { MoneyUtils.formatYearMonthArabic(selectedYearMonth) }
+    val isCurrentMonth = selectedYearMonth == currentYm
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .testTag("monthly_scope_bar"),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onPreviousMonth,
+                modifier = Modifier
+                    .size(36.dp)
+                    .testTag("prev_month_btn")
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "الشهر السابق"
+                )
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CalendarMonth,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(
+                    text = "< $monthTitleAr >",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.testTag("month_selector_label")
+                )
+                if (!isCurrentMonth) {
+                    TextButton(
+                        onClick = onResetCurrentMonth,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier
+                            .height(28.dp)
+                            .testTag("reset_current_month_btn")
+                    ) {
+                        Text(
+                            text = "الشهر الحالي",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            IconButton(
+                onClick = onNextMonth,
+                modifier = Modifier
+                    .size(36.dp)
+                    .testTag("next_month_btn")
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                    contentDescription = "الشهر التالي"
+                )
+            }
+        }
     }
 }
 

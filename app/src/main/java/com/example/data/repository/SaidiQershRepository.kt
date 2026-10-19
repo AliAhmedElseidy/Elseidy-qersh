@@ -66,7 +66,18 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
         dao.updateBank(bank.copy(smsEnabled = enabled))
     }
 
-    suspend fun addCustomBank(nameAr: String, nameEn: String, code: String, currency: String, senderIds: String): Long {
+    suspend fun toggleBankAutoApprove(bank: BankEntity, autoApprove: Boolean) {
+        dao.updateBank(bank.copy(autoApproveEnabled = autoApprove))
+    }
+
+    suspend fun addCustomBank(
+        nameAr: String,
+        nameEn: String,
+        code: String,
+        currency: String,
+        senderIds: String,
+        autoApproveEnabled: Boolean = false
+    ): Long {
         return dao.insertBank(
             BankEntity(
                 nameAr = nameAr,
@@ -74,7 +85,8 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
                 code = code.uppercase(),
                 defaultCurrency = currency,
                 senderIdsCsv = senderIds,
-                smsEnabled = true
+                smsEnabled = true,
+                autoApproveEnabled = autoApproveEnabled
             )
         )
     }
@@ -128,10 +140,6 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
             accounts = accounts
         )
 
-        if (!parsed.isBankSmsEnabled && !isTestSandbox) {
-            return null
-        }
-
         // الفلترة التلقائية للرسائل غير المالية (تفعيل مستفيد، OTP، تسجيل دخول، إشعار رصيد...)
         if (parsed.suggestedType == SmsSuggestedType.BALANCE_NOTICE_ONLY || parsed.reviewStatus == ReviewStatus.IGNORED) {
             dao.insertAuditLog(
@@ -146,6 +154,23 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
             return null
         }
 
+        // تسجيل جهة المرسل ديناميكياً في قائمة الجهات المسموحة إذا كانت جهة جديدة
+        val senderBank = com.example.receivers.BankSmsBroadcastReceiver.ensureDynamicSenderRegistered(
+            dao = dao,
+            senderAddress = parsed.senderAddress,
+            resolvedBankName = parsed.bankName,
+            currency = parsed.currency,
+            matchedBankId = parsed.matchedBankId
+        )
+
+        val isSenderEnabled = senderBank?.smsEnabled ?: parsed.isBankSmsEnabled
+        val isAutoApprove = senderBank?.autoApproveEnabled ?: parsed.isAutoApproveEnabled
+
+        // Toggle 1: إذا عطل المستخدم قراءة رسائل هذه الجهة، نتجاهلها تماماً
+        if (!isSenderEnabled && !isTestSandbox) {
+            return null
+        }
+
         val existingByHash = dao.getSuggestedByHash(parsed.messageHash)
         if (existingByHash != null) {
             return null
@@ -157,9 +182,10 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
 
         val matchedAccount = parsed.matchedAccountId?.let { id -> accounts.firstOrNull { it.id == id } }
             ?: accounts.firstOrNull {
-                it.smsParsingEnabled && (parsed.matchedBankId != null && it.bankId == parsed.matchedBankId)
+                it.smsParsingEnabled && (senderBank != null && it.bankId == senderBank.id)
             }
             ?: accounts.firstOrNull { it.smsParsingEnabled }
+            ?: accounts.firstOrNull()
 
         val status = if (existingByRef != null) ReviewStatus.DUPLICATE else parsed.reviewStatus
 
@@ -167,7 +193,7 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
             messageHash = parsed.messageHash,
             referenceNumber = parsed.referenceNumber,
             senderAddress = parsed.senderAddress,
-            bankId = parsed.matchedBankId,
+            bankId = senderBank?.id ?: parsed.matchedBankId,
             bankName = parsed.bankName,
             sanitizedSnippet = parsed.sanitizedSnippet,
             extractedAmountMinor = parsed.extractedAmountMinor,
@@ -186,6 +212,16 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
 
         val id = dao.insertSuggestedTransaction(entity)
         if (id > 0L) {
+            // Toggle 2: اعتماد وتسجيل تلقائي فوري (Auto-Approve) إذا كان مفعلاً لهذه الجهة
+            if (isAutoApprove &&
+                status == ReviewStatus.PENDING &&
+                parsed.extractedAmountMinor != null &&
+                parsed.extractedAmountMinor > 0L
+            ) {
+                dao.confirmSuggestedTransaction(id)
+                return id
+            }
+
             dao.insertAuditLog(
                 ImportAuditLogEntity(
                     eventType = "SMS_IMPORT",

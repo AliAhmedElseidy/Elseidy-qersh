@@ -31,6 +31,8 @@ data class BudgetAlertItem(
 )
 
 data class DashboardSummary(
+    val selectedYearMonth: String = MoneyUtils.currentYearMonth(),
+    val selectedMonthLabelAr: String = MoneyUtils.formatYearMonthArabic(MoneyUtils.currentYearMonth()),
     val primaryCurrency: String = "SAR",
     val todayExpenseMinor: Long = 0L,
     val monthExpenseMinor: Long = 0L,
@@ -61,6 +63,10 @@ class SaidiQershViewModel(
 
     private val _filterState = MutableStateFlow(TransactionFilterState())
     val filterState: StateFlow<TransactionFilterState> = _filterState.asStateFlow()
+
+    // الشهر المستقل المختار في التطبيق (افتراضياً الشهر الحالي من يوم 1 حتى اليوم)
+    private val _selectedYearMonth = MutableStateFlow(MoneyUtils.currentYearMonth())
+    val selectedYearMonth: StateFlow<String> = _selectedYearMonth.asStateFlow()
 
     private val _selectedCurrency = MutableStateFlow("SAR")
     val selectedCurrency: StateFlow<String> = _selectedCurrency.asStateFlow()
@@ -99,6 +105,21 @@ class SaidiQershViewModel(
     val suggestedTransactions: StateFlow<List<SuggestedTransactionEntity>> = repository.suggestedTransactionsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    /**
+     * رسائل الشهر المختار فقط (تحديد نطاق قراءة وعرض الرسائل بالشهر المختار/الحالي فقط لمنع تراكم الرسائل القديمة)
+     */
+    val monthlySuggestedTransactions: StateFlow<List<SuggestedTransactionEntity>> = combine(
+        suggestedTransactions,
+        _selectedYearMonth
+    ) { list, ym ->
+        val (monthStart, monthEnd) = MoneyUtils.monthRangeMillis(ym)
+        val currentYm = MoneyUtils.currentYearMonth()
+        list.filter { item ->
+            val inSelectedMonth = item.smsTimestamp in monthStart..monthEnd
+            inSelectedMonth || (item.isTestSandbox && ym == currentYm)
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val budgets: StateFlow<List<BudgetEntity>> = repository.budgetsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -123,15 +144,34 @@ class SaidiQershViewModel(
         }
     }
 
+    fun selectPreviousMonth() {
+        _selectedYearMonth.update { MoneyUtils.previousYearMonth(it) }
+    }
+
+    fun selectNextMonth() {
+        _selectedYearMonth.update { MoneyUtils.nextYearMonth(it) }
+    }
+
+    fun resetToCurrentMonth() {
+        _selectedYearMonth.value = MoneyUtils.currentYearMonth()
+    }
+
+    fun setSelectedYearMonth(yearMonth: String) {
+        _selectedYearMonth.value = yearMonth
+    }
+
     val filteredTransactions: StateFlow<List<TransactionEntity>> = combine(
         allConfirmedTransactions,
-        _filterState
-    ) { list, filter ->
+        _filterState,
+        _selectedYearMonth
+    ) { list, filter, ym ->
+        val (monthStart, monthEnd) = MoneyUtils.monthRangeMillis(ym)
         val minMinor = MoneyUtils.parseToMinorUnits(filter.minAmountText)
         val maxMinor = MoneyUtils.parseToMinorUnits(filter.maxAmountText)
         val q = filter.searchQuery.trim().lowercase()
 
         list.filter { tx ->
+            val inMonth = tx.timestamp in monthStart..monthEnd
             val matchesQuery = q.isEmpty() ||
                 tx.description.lowercase().contains(q) ||
                 tx.merchantName.lowercase().contains(q) ||
@@ -145,7 +185,7 @@ class SaidiQershViewModel(
             val matchesCategory = filter.selectedCategoryId == null || tx.categoryId == filter.selectedCategoryId
             val matchesMin = minMinor == null || tx.amountMinor >= minMinor
             val matchesMax = maxMinor == null || tx.amountMinor <= maxMinor
-            matchesQuery && matchesType && matchesAccount && matchesCategory && matchesMin && matchesMax
+            inMonth && matchesQuery && matchesType && matchesAccount && matchesCategory && matchesMin && matchesMax
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -155,8 +195,9 @@ class SaidiQershViewModel(
         categories,
         budgets,
         obligations,
-        suggestedTransactions,
-        _selectedCurrency
+        monthlySuggestedTransactions,
+        _selectedCurrency,
+        _selectedYearMonth
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val txs = values[0] as List<TransactionEntity>
@@ -169,14 +210,14 @@ class SaidiQershViewModel(
         @Suppress("UNCHECKED_CAST")
         val obls = values[4] as List<ObligationEntity>
         @Suppress("UNCHECKED_CAST")
-        val suggested = values[5] as List<SuggestedTransactionEntity>
+        val suggestedInMonth = values[5] as List<SuggestedTransactionEntity>
         val cur = values[6] as String
+        val selectedYm = values[7] as String
 
         val now = System.currentTimeMillis()
         val (todayStart, todayEnd) = MoneyUtils.todayRangeMillis(now)
-        val currentYm = MoneyUtils.currentYearMonth(now)
-        val prevYm = MoneyUtils.previousYearMonth(currentYm)
-        val (monthStart, monthEnd) = MoneyUtils.monthRangeMillis(currentYm)
+        val prevYm = MoneyUtils.previousYearMonth(selectedYm)
+        val (monthStart, monthEnd) = MoneyUtils.monthRangeMillis(selectedYm)
         val (prevStart, prevEnd) = MoneyUtils.monthRangeMillis(prevYm)
 
         val todayTxs = txs.filter { it.timestamp in todayStart..todayEnd }
@@ -190,8 +231,9 @@ class SaidiQershViewModel(
 
         val netBalance = accs.sumOf { it.currentBalanceMinor }
 
-        val currentMonthBudgets = bds.filter { it.yearMonth == currentYm }
+        val currentMonthBudgets = bds.filter { it.yearMonth == selectedYm }
         val totalBudgetObj = currentMonthBudgets.firstOrNull { it.categoryKey == "TOTAL" }
+            ?: bds.firstOrNull { it.categoryKey == "TOTAL" }
         val budgetLimit = totalBudgetObj?.limitMinor ?: 8000_00L
         val remainingBudget = budgetLimit - monthExpense
 
@@ -252,10 +294,12 @@ class SaidiQershViewModel(
             }
         }
 
-        val pendingSms = suggested.count { it.status == ReviewStatus.PENDING && !it.isTestSandbox }
-        val unclearSms = suggested.count { it.status == ReviewStatus.UNCLEAR && !it.isTestSandbox }
+        val pendingSms = suggestedInMonth.count { it.status == ReviewStatus.PENDING && !it.isTestSandbox }
+        val unclearSms = suggestedInMonth.count { it.status == ReviewStatus.UNCLEAR && !it.isTestSandbox }
 
         DashboardSummary(
+            selectedYearMonth = selectedYm,
+            selectedMonthLabelAr = MoneyUtils.formatYearMonthArabic(selectedYm),
             primaryCurrency = cur,
             todayExpenseMinor = todayExpense,
             monthExpenseMinor = monthExpense,
@@ -438,10 +482,26 @@ class SaidiQershViewModel(
         }
     }
 
+    /**
+     * Toggle 1: قراءة رسائل هذه الجهة (مفعّل / معطّل)
+     */
     fun toggleBankSms(bank: BankEntity, enabled: Boolean) {
         viewModelScope.launch {
             repository.toggleBankSmsEnabled(bank, enabled)
-            showBanner(if (enabled) "تم تفعيل قراءة رسائل ${bank.nameAr}" else "تم إيقاف قراءة رسائل ${bank.nameAr}")
+            showBanner(if (enabled) "تم تفعيل قراءة رسائل ${bank.nameAr}" else "تم إيقاف وتجاهل رسائل ${bank.nameAr}")
+        }
+    }
+
+    /**
+     * Toggle 2 (ميزة مستقلة): اعتماد وتسجيل تلقائي فوري (Auto-Approve)
+     */
+    fun toggleBankAutoApprove(bank: BankEntity, autoApprove: Boolean) {
+        viewModelScope.launch {
+            repository.toggleBankAutoApprove(bank, autoApprove)
+            showBanner(
+                if (autoApprove) "تم تفعيل الاعتماد والتسجيل التلقائي الفوري لرسائل ${bank.nameAr}"
+                else "تم إيقاف الاعتماد التلقائي لرسائل ${bank.nameAr} (ستحتاج مراجعة يدوية)"
+            )
         }
     }
 
@@ -449,7 +509,7 @@ class SaidiQershViewModel(
         if (nameAr.isBlank() || senderIds.isBlank()) return
         viewModelScope.launch {
             repository.addCustomBank(nameAr, nameAr, code.ifBlank { "BANK_${System.currentTimeMillis() % 1000}" }, currency, senderIds)
-            showBanner("تمت إضافة البنك $nameAr إلى قائمة البنوك المدعومة")
+            showBanner("تمت إضافة جهة الرسائل «$nameAr» إلى قائمة الجهات المسموحة")
         }
     }
 
@@ -487,9 +547,9 @@ class SaidiQershViewModel(
                 isTestSandbox = isTestSandbox
             )
             if (id != null && id > 0L) {
-                showBanner("تم تحليل الرسالة البنكية وربطها بالحساب تلقائياً للمراجعة")
+                showBanner("تم تحليل الرسالة من المرسل «${sender.ifBlank { "Alinma" }}» بنجاح")
             } else {
-                showBanner("تم استبعاد الرسالة تلقائياً (رسالة غير مالية / OTP / تفعيل مستفيد أو مكررة)")
+                showBanner("تم استبعاد الرسالة تلقائياً (الجهة معطّلة / رسالة غير مالية / OTP / مكررة)")
             }
         }
     }
@@ -498,21 +558,21 @@ class SaidiQershViewModel(
         viewModelScope.launch {
             val samples = listOf(
                 "Alinma" to "شراء عبر Samsung Wallet مبلغ: ريال سعودى 10 بطاقة مدى: *5650 حساب: *2000 من: dani est",
-                "AlRajhiBank" to "شراء عبر نقاط البيع\nبطاقة: *4821;مدى-أثير\nبمبلغ: SAR 145.50\nلدى: أسواق التميمي\nفي: 2026/10/18 19:20\nمرجع: RJ8849201",
-                "SNB AlAhli" to "عملية شراء مدى\nبمبلغ 68.00 ر.س\nلدى محطة الدريس للوقود\nتاريخ 2026/10/18\nرقم المرجع: SNB441092",
-                "Alinma" to "حوالة صادرة مقبولة\nالمبلغ: 1,250.00 SAR\nحساب: *2000\nالمستفيد: مؤسسة السكن العقارية\nمرجع رقم: INM773910",
-                "AlRajhiBank" to "إشعار استرداد مبلغ\nبمبلغ: SAR 45.00\nلدى: صيدلية النهدي\nمرجع: RJ9910234",
-                "RiyadBank" to "سداد فاتورة سداد\nمفوتر: الشركة السعودية للكهرباء\nالمبلغ: 390.25 ريال\nمرجع: SADAD55201",
+                "Enjaz" to "حوالة صادرة عبر إنجاز بمبلغ: 550.00 ريال سعودي المستفيد: محمد أحمد مرجع: ENJ99120",
+                "Urpay" to "شراء عبر محفظة Urpay بمبلغ: SAR 35.00 لدى: كافيه القهوة المختصة مرجع: URP4410",
+                "STC Pay" to "عملية شراء بطاقة STC Pay بمبلغ 120.00 ر.س لدى: صيدلية النهدي مرجع: STC8812",
+                "VF-Cash" to "تم تحويل مبلغ 450.00 ج.م من محفظة فودافون كاش رقم المرجع: VF77201",
+                "AlRajhiBank" to "شراء عبر نقاط البيع\nبطاقة: *4821;مدى-أثير\nبمبلغ: SAR 145.50\nلدى: أسواق التميمي\nمرجع: RJ8849201",
+                "SNB AlAhli" to "عملية شراء مدى\nبمبلغ 68.00 ر.س\nلدى محطة الدريس للوقود\nرقم المرجع: SNB441092",
                 "Alinma" to "تم تفعيل مستفيد بنجاح في مصرف الإنماء، رمز التحقق OTP هو 8821 لا تشاركه مع أحد",
-                "AlRajhiBank" to "تسجيل دخول لحسابكم في مباشر الأفراد، كلمة المرور المؤقتة: 4419",
-                "AlRajhiBank" to "عزيزي العميل، الرصيد المتاح في حسابكم الجاري هو 12,450.00 ر.س"
+                "AlRajhiBank" to "تسجيل دخول لحسابكم في مباشر الأفراد، كلمة المرور المؤقتة: 4419"
             )
             var count = 0
             for ((sender, text) in samples) {
                 val id = repository.ingestBankSms(sender, text, isTestSandbox = true)
                 if (id != null && id > 0L) count++
             }
-            showBanner("تم تحليل الرسائل (تم استبعاد رسائل التفعيل وOTP تلقائياً وإضافة $count عملية مالية للمراجعة)")
+            showBanner("تم تحليل الرسائل بالمرسل الحقيقي (Alinma, Enjaz, Urpay, STC Pay, VF-Cash) وإضافة $count عملية")
         }
     }
 
@@ -526,10 +586,12 @@ class SaidiQershViewModel(
     fun scanPhoneSmsInbox(context: Context) {
         viewModelScope.launch {
             try {
-                val count = BankSmsBroadcastReceiver.scanDeviceInboxForBankSms(context)
+                val targetYm = _selectedYearMonth.value
+                val count = BankSmsBroadcastReceiver.scanDeviceInboxForBankSms(context, targetYm)
+                val monthLabel = MoneyUtils.formatYearMonthArabic(targetYm)
                 showBanner(
-                    if (count > 0) "تم استيراد $count رسالة بنكية جديدة إلى قائمة المراجعة"
-                    else "تم فحص صندوق الوارد؛ لا توجد رسائل بنكية جديدة غير مراجعة"
+                    if (count > 0) "تم استيراد $count رسالة مالية جديدة لشهر $monthLabel واكتشاف جهات الإرسال"
+                    else "تم فحص رسائل شهر $monthLabel؛ لا توجد رسائل مالية جديدة غير مراجعة"
                 )
             } catch (e: SecurityException) {
                 showBanner("يرجى منح صلاحية قراءة الرسائل أولًا لفحص صندوق الوارد")
@@ -609,7 +671,7 @@ class SaidiQershViewModel(
         val limitMinor = MoneyUtils.parseToMinorUnits(limitText) ?: return
         if (limitMinor <= 0L) return
         viewModelScope.launch {
-            val ym = MoneyUtils.currentYearMonth()
+            val ym = _selectedYearMonth.value
             val cat = categories.value.firstOrNull { it.id == categoryId }
             val key = categoryId?.toString() ?: "TOTAL"
             val name = cat?.nameAr ?: "الميزانية الشهرية الإجمالية"
@@ -623,7 +685,7 @@ class SaidiQershViewModel(
                     currency = currency
                 )
             )
-            showBanner("تم تحديث $name لشهر $ym")
+            showBanner("تم تحديث $name لشهر ${MoneyUtils.formatYearMonthArabic(ym)}")
         }
     }
 
@@ -673,7 +735,7 @@ class SaidiQershViewModel(
         viewModelScope.launch {
             val ok = repository.recordObligationPayment(
                 obligationId = obligation.id,
-                paymentKey = paymentKey.ifBlank { MoneyUtils.currentYearMonth() },
+                paymentKey = paymentKey.ifBlank { _selectedYearMonth.value },
                 amountMinor = amountMinor,
                 accountId = accountId ?: obligation.accountId ?: accounts.value.firstOrNull()?.id,
                 alreadyRecordedAsExpense = alreadyRecordedAsExpense
