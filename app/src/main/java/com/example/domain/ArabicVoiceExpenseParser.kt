@@ -127,17 +127,11 @@ object ArabicVoiceExpenseParser {
             else -> defaultCurrency
         }
 
-        // 1. محاولة استخراج رقم مباشر (مثل 35 أو 120.5)
         val numericMatch = Regex("([0-9]+(?:\\.[0-9]{1,2})?)").find(normalized)
         val amountMinorFromDigits = numericMatch?.groupValues?.get(1)?.let { MoneyUtils.parseToMinorUnits(it) }
 
-        // 2. إذا لم يكن هناك رقم مكتوب، نحلل الأعداد العربية المنطوقة مثل «خمسة وثلاثين»
         val amountMinor = amountMinorFromDigits ?: extractSpokenArabicNumberMinor(normalized)
-
-        // 3. استخراج الوصف الصافي بعد حذف أفعال الدفع والمبلغ والعملة
         val description = extractCleanDescription(normalized)
-
-        // 4. اقتراح التصنيف المناسب
         val (catId, catName) = matchCategory(description.ifBlank { normalized }, categories)
 
         return VoiceExpenseProposal(
@@ -162,7 +156,6 @@ object ArabicVoiceExpenseParser {
         var matchedAny = false
 
         for (rawToken in tokens) {
-            // معالجة حرف العطف "و" الملتصق بالكلمة مثل "وثلاثين" أو "وخمسين"
             val tokenWithoutWaw = if (rawToken.startsWith("و") && rawToken.length > 2) {
                 rawToken.substring(1)
             } else {
@@ -190,7 +183,7 @@ object ArabicVoiceExpenseParser {
         val stopWords = setOf(
             "دفعت", "صرفت", "اشتريت", "سددت", "حولت", "مبلغ",
             "ريال", "ريالات", "ريالين", "جنيه", "جنيهات", "جنيهين", "درهم", "دولار",
-            "سعودي", "مصري", "نصف", "ونصف", "نص", "ونص", "في", "على", "من", "اليوم"
+            "سعودي", "سعودى", "مصري", "مصرى", "نصف", "ونصف", "نص", "ونص", "في", "على", "من", "اليوم"
         )
         val tokens = text
             .replace(Regex("[0-9]+(?:\\.[0-9]+)?"), " ")
@@ -210,16 +203,19 @@ object ArabicVoiceExpenseParser {
     private fun matchCategory(text: String, categories: List<CategoryEntity>): Pair<Long?, String> {
         val lower = text.lowercase(Locale.ROOT)
         val targetName = when {
-            lower.contains("بنزين") || lower.contains("وقود") || lower.contains("تاكسي") || lower.contains("أوبر") || lower.contains("مواصلات") || lower.contains("سيارة") -> "الوقود والمواصلات"
-            lower.contains("خبز") || lower.contains("مقاضي") || lower.contains("خضار") || lower.contains("فاكهة") || lower.contains("سوبرماركت") || lower.contains("بقالة") || lower.contains("حليب") -> "مقاضي البيت والتموين"
-            lower.contains("قهوة") || lower.contains("عشاء") || lower.contains("غداء") || lower.contains("فطور") || lower.contains("مطعم") || lower.contains("كافيه") -> "المطاعم والكافيهات"
-            lower.contains("فاتورة") || lower.contains("كهرباء") || lower.contains("نت") || lower.contains("شحن") || lower.contains("جوال") -> "الفواتير والاتصالات"
-            lower.contains("دواء") || lower.contains("صيدلية") || lower.contains("طبيب") || lower.contains("علاج") -> "الصحةوالصيدلية"
-            lower.contains("إيجار") || lower.contains("ايجار") || lower.contains("صيانة") -> "السكن والإيجار"
-            else -> "التسوق والمشتريات"
+            lower.contains("بنزين") || lower.contains("وقود") -> "بنزين"
+            lower.contains("تاكسي") || lower.contains("أوبر") || lower.contains("مواصلات") || lower.contains("سيارة") || lower.contains("كريم") -> "مواصلات"
+            lower.contains("خبز") || lower.contains("مقاضي") || lower.contains("خضار") || lower.contains("فاكهة") || lower.contains("سوبرماركت") || lower.contains("بقالة") || lower.contains("حليب") || lower.contains("كارفور") -> "بقالة"
+            lower.contains("قهوة") || lower.contains("عشاء") || lower.contains("غداء") || lower.contains("فطور") || lower.contains("مطعم") || lower.contains("كافيه") || lower.contains("دانكن") || lower.contains("أكل") -> "أكل بره"
+            lower.contains("فاتورة") || lower.contains("كهرباء") || lower.contains("نت") || lower.contains("شحن") || lower.contains("جوال") -> "فواتير"
+            lower.contains("دواء") || lower.contains("صيدلية") || lower.contains("طبيب") || lower.contains("علاج") -> "صحة"
+            lower.contains("إيجار") || lower.contains("ايجار") || lower.contains("صيانة") -> "إيجار"
+            lower.contains("قسط") -> "أقساط"
+            lower.contains("جمعية") -> "جمعيات"
+            else -> "تسوق"
         }
         val cat = categories.firstOrNull { it.nameAr == targetName }
-            ?: categories.firstOrNull { it.nameAr.contains(targetName.take(5)) }
+            ?: categories.firstOrNull { it.nameAr.contains(targetName.take(4)) }
         return cat?.id to (cat?.nameAr ?: targetName)
     }
 }

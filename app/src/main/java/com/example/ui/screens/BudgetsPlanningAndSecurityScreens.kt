@@ -1116,22 +1116,29 @@ private fun SecurityAndAuditSection(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text("المظهر (فاتح / داكن / تلقائي):")
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilterChip(
-                            selected = isDarkModePreferred == false,
-                            onClick = { onToggleDarkMode(false) },
-                            label = { Text("فاتح") }
-                        )
+                    Text("المظهر (غامق / فاتح / زي الموبايل):", fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(
                             selected = isDarkModePreferred == true,
                             onClick = { onToggleDarkMode(true) },
-                            label = { Text("داكن") }
+                            label = { Text("غامق") },
+                            modifier = Modifier.testTag("theme_mode_dark")
+                        )
+                        FilterChip(
+                            selected = isDarkModePreferred == false,
+                            onClick = { onToggleDarkMode(false) },
+                            label = { Text("فاتح") },
+                            modifier = Modifier.testTag("theme_mode_light")
+                        )
+                        FilterChip(
+                            selected = isDarkModePreferred == null,
+                            onClick = { onToggleDarkMode(null) },
+                            label = { Text("زي الموبايل") },
+                            modifier = Modifier.testTag("theme_mode_system")
                         )
                     }
                 }

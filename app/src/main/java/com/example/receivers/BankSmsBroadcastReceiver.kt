@@ -17,7 +17,7 @@ import kotlinx.coroutines.launch
 /**
  * مستقبل الرسائل البنكية الفعلي (Android SMS BroadcastReceiver)
  * يعمل محليًا بالكامل عند وصول رسالة جديدة، ويحولها إلى مقترح بحالة Pending للمراجعة
- * دون المساس بالأرصدة المؤكدة حتى يضغط المستخدم على «تأكيد وتسجيل».
+ * مع الفلترة التلقائية للرسائل غير المالية والربط الذكي للحسابات والبطاقات.
  */
 class BankSmsBroadcastReceiver : BroadcastReceiver() {
 
@@ -49,9 +49,6 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
     }
 
     companion object {
-        /**
-         * يعالج رسالة واحدة ويخزنها في قائمة المراجعة إذا كانت من بنك مفعل وغير مكررة.
-         */
         suspend fun processIncomingSmsLocally(
             context: Context,
             senderAddress: String,
@@ -64,6 +61,7 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
             val banks = dao.getAllBanks()
             val rules = dao.getActiveSmsRules()
             val categories = dao.getAllCategories()
+            val accounts = dao.getAllAccounts()
 
             val parsed = BankSmsParserEngine.parseSms(
                 senderAddress = senderAddress,
@@ -71,22 +69,22 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 smsTimestamp = smsTimestamp,
                 knownBanks = banks,
                 customRules = rules,
-                categories = categories
+                categories = categories,
+                accounts = accounts
             )
 
-            // احترام إعداد المستخدم في تفعيل أو تعطيل قراءة الرسائل لكل بنك
             if (!parsed.isBankSmsEnabled && !isTestSandbox) {
                 return null
             }
 
-            // تجاهل الرسائل غير المالية أو إشعارات الرصيد البحتة مع تسجيلها في سجل الاستيراد للشفافية
-            if (parsed.suggestedType == SmsSuggestedType.BALANCE_NOTICE_ONLY) {
+            // استبعاد الرسائل غير المالية (تفعيل مستفيد، OTP، تسجيل دخول، إشعار رصيد) تلقائياً
+            if (parsed.suggestedType == SmsSuggestedType.BALANCE_NOTICE_ONLY || parsed.reviewStatus == ReviewStatus.IGNORED) {
                 dao.insertAuditLog(
                     ImportAuditLogEntity(
-                        eventType = "SMS_IGNORED_BALANCE",
+                        eventType = "SMS_AUTO_IGNORED",
                         entityType = "SMS",
                         sourceDescription = parsed.bankName,
-                        details = "تم تجاهل رسالة إشعار رصيد / غير معاملة تلقائيًا: ${parsed.sanitizedSnippet}",
+                        details = "تم استبعاد رسالة غير مالية تلقائياً: ${parsed.sanitizedSnippet}",
                         reviewStatus = ReviewStatus.IGNORED.name
                     )
                 )
@@ -102,12 +100,12 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 dao.getSuggestedByRefAndBank(ref, parsed.bankName)
             }
 
-            val accounts = dao.getAllAccounts()
-            val matchedAccount = accounts.firstOrNull {
-                it.smsParsingEnabled && (parsed.matchedBankId != null && it.bankId == parsed.matchedBankId)
-            } ?: accounts.firstOrNull { it.smsParsingEnabled }
+            val matchedAccount = parsed.matchedAccountId?.let { id -> accounts.firstOrNull { it.id == id } }
+                ?: accounts.firstOrNull {
+                    it.smsParsingEnabled && (parsed.matchedBankId != null && it.bankId == parsed.matchedBankId)
+                }
+                ?: accounts.firstOrNull { it.smsParsingEnabled }
 
-            // إذا كان الحساب البنكي المرتبط معطلًا لمعالجة الرسائل
             if (matchedAccount == null && !isTestSandbox && accounts.isNotEmpty()) {
                 return null
             }
@@ -132,6 +130,8 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 suggestedCategoryId = parsed.suggestedCategoryId,
                 suggestedCategoryName = parsed.suggestedCategoryName,
                 suggestedAccountId = matchedAccount?.id,
+                extractedAccountLast4 = parsed.extractedAccountLast4,
+                extractedCardLast4 = parsed.extractedCardLast4,
                 status = finalStatus,
                 isTestSandbox = isTestSandbox,
                 smsTimestamp = parsed.smsTimestamp,
@@ -155,9 +155,6 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
             return null
         }
 
-        /**
-         * يفحص صندوق رسائل الهاتف الفعلي (عند منح صلاحية READ_SMS) لاستيراد رسائل البنوك المفعلة.
-         */
         suspend fun scanDeviceInboxForBankSms(context: Context, maxMessages: Int = 60): Int {
             var importedCount = 0
             val resolver = context.contentResolver

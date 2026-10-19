@@ -77,6 +77,7 @@ class SaidiQershViewModel(
     private val _isAppUnlocked = MutableStateFlow(true)
     val isAppUnlocked: StateFlow<Boolean> = _isAppUnlocked.asStateFlow()
 
+    // null = زي الموبايل (تلقائي حسب النظام)، false = فاتح، true = غامق
     private val _isDarkModePreferred = MutableStateFlow<Boolean?>(null)
     val isDarkModePreferred: StateFlow<Boolean?> = _isDarkModePreferred.asStateFlow()
 
@@ -194,7 +195,6 @@ class SaidiQershViewModel(
         val budgetLimit = totalBudgetObj?.limitMinor ?: 8000_00L
         val remainingBudget = budgetLimit - monthExpense
 
-        // توزيع المصروفات حسب التصنيف للشهر الحالي
         val catMap = cats.associateBy { it.id }
         val expenseTxsThisMonth = monthTxs.filter {
             it.type == TransactionType.EXPENSE || it.type == TransactionType.OBLIGATION_PAYMENT
@@ -207,7 +207,7 @@ class SaidiQershViewModel(
                 val sum = group.sumOf { it.amountMinor }
                 CategorySpendingSlice(
                     categoryId = catId,
-                    categoryName = cat?.nameAr ?: "أخرى / غير مصنف",
+                    categoryName = cat?.nameAr ?: "أخرى",
                     colorHex = cat?.colorHex ?: "#0D4732",
                     amountMinor = sum,
                     percentage = (sum.toFloat() / totalGrossCatExpense.toFloat()).coerceIn(0f, 1f)
@@ -215,7 +215,6 @@ class SaidiQershViewModel(
             }
             .sortedByDescending { it.amountMinor }
 
-        // تنبيهات تجاوز 80% و100% للميزانية الإجمالية وميزانيات التصنيفات
         val alerts = mutableListOf<BudgetAlertItem>()
         if (budgetLimit > 0L) {
             val pct = ((monthExpense * 100L) / budgetLimit).toInt()
@@ -326,6 +325,9 @@ class SaidiQershViewModel(
         toAccountId: Long? = null,
         categoryId: Long? = null,
         merchantName: String = "",
+        isMonthlyObligation: Boolean = false,
+        linkedObligationId: Long? = null,
+        source: TransactionSource = TransactionSource.MANUAL,
         timestamp: Long = System.currentTimeMillis()
     ) {
         val amountMinor = MoneyUtils.parseToMinorUnits(amountText)
@@ -340,12 +342,16 @@ class SaidiQershViewModel(
 
         viewModelScope.launch {
             val acc = accounts.value.firstOrNull { it.id == accountId }
+            val catName = categories.value.firstOrNull { it.id == categoryId }?.nameAr ?: type.titleAr
+            val finalDescription = description.ifBlank {
+                if (merchantName.isNotBlank()) merchantName else catName
+            }
             val tx = TransactionEntity(
                 id = existingId,
-                type = type,
+                type = if (isMonthlyObligation && type == TransactionType.EXPENSE) TransactionType.OBLIGATION_PAYMENT else type,
                 amountMinor = amountMinor,
                 currency = currency,
-                description = description.ifBlank { type.titleAr },
+                description = finalDescription,
                 notes = notes,
                 timestamp = timestamp,
                 accountId = accountId,
@@ -354,10 +360,22 @@ class SaidiQershViewModel(
                 bankId = acc?.bankId,
                 bankName = acc?.bankName ?: "",
                 merchantName = merchantName,
-                source = TransactionSource.MANUAL
+                source = source,
+                obligationId = linkedObligationId,
+                isMonthlyObligationPayment = isMonthlyObligation
             )
             if (existingId == 0L) {
                 repository.addConfirmedTransaction(tx)
+                if (isMonthlyObligation && linkedObligationId != null) {
+                    repository.recordObligationPayment(
+                        obligationId = linkedObligationId,
+                        paymentKey = "${MoneyUtils.currentYearMonth()}-${System.currentTimeMillis() % 10000}",
+                        amountMinor = amountMinor,
+                        accountId = accountId,
+                        alreadyRecordedAsExpense = true,
+                        notes = finalDescription
+                    )
+                }
                 showBanner("تم حفظ العملية وتحديث الأرصدة مباشرة")
             } else {
                 repository.updateConfirmedTransaction(tx)
@@ -381,7 +399,9 @@ class SaidiQershViewModel(
         bankId: Long?,
         currency: String,
         openingBalanceText: String,
-        smsEnabled: Boolean
+        smsEnabled: Boolean,
+        accountLast4: String = "",
+        cardLast4: String = ""
     ) {
         val openingMinor = MoneyUtils.parseToMinorUnits(openingBalanceText) ?: 0L
         viewModelScope.launch {
@@ -395,6 +415,8 @@ class SaidiQershViewModel(
                 currency = currency,
                 openingBalanceMinor = openingMinor,
                 currentBalanceMinor = openingMinor,
+                accountLast4 = accountLast4.trim(),
+                cardLast4 = cardLast4.trim(),
                 smsParsingEnabled = smsEnabled
             )
             repository.saveAccount(acc)
@@ -439,7 +461,7 @@ class SaidiQershViewModel(
         }
     }
 
-    fun saveCategory(existingId: Long = 0L, nameAr: String, type: CategoryType, colorHex: String) {
+    fun saveCategory(existingId: Long = 0L, nameAr: String, type: CategoryType, colorHex: String, iconName: String = "📦") {
         if (nameAr.isBlank()) return
         viewModelScope.launch {
             repository.saveCategory(
@@ -447,6 +469,7 @@ class SaidiQershViewModel(
                     id = existingId,
                     nameAr = nameAr.trim(),
                     type = type,
+                    iconName = iconName,
                     colorHex = colorHex
                 )
             )
@@ -459,14 +482,14 @@ class SaidiQershViewModel(
         if (body.isBlank()) return
         viewModelScope.launch {
             val id = repository.ingestBankSms(
-                senderAddress = sender.ifBlank { "AlRajhiBank" },
+                senderAddress = sender.ifBlank { "Alinma" },
                 rawBody = body,
                 isTestSandbox = isTestSandbox
             )
             if (id != null && id > 0L) {
-                showBanner("تم تحليل الرسالة وإضافتها إلى قائمة «عمليات تحتاج إلى مراجعة»")
+                showBanner("تم تحليل الرسالة البنكية وربطها بالحساب تلقائياً للمراجعة")
             } else {
-                showBanner("لم تُضف الرسالة (إما إشعار رصيد فقط، أو مكررة، أو البنك معطل)")
+                showBanner("تم استبعاد الرسالة تلقائياً (رسالة غير مالية / OTP / تفعيل مستفيد أو مكررة)")
             }
         }
     }
@@ -474,22 +497,22 @@ class SaidiQershViewModel(
     fun loadRealisticBankSamplesIntoSandbox() {
         viewModelScope.launch {
             val samples = listOf(
-                "AlRajhiBank" to "شراء عبر نقاط البيع\nبطاقة: 4821;مدى-أثير\nبمبلغ: SAR 145.50\nلدى: أسواق التميمي\nفي: 2026/10/18 19:20\nمرجع: RJ8849201",
+                "Alinma" to "شراء عبر Samsung Wallet مبلغ: ريال سعودى 10 بطاقة مدى: *5650 حساب: *2000 من: dani est",
+                "AlRajhiBank" to "شراء عبر نقاط البيع\nبطاقة: *4821;مدى-أثير\nبمبلغ: SAR 145.50\nلدى: أسواق التميمي\nفي: 2026/10/18 19:20\nمرجع: RJ8849201",
                 "SNB AlAhli" to "عملية شراء مدى\nبمبلغ 68.00 ر.س\nلدى محطة الدريس للوقود\nتاريخ 2026/10/18\nرقم المرجع: SNB441092",
-                "Alinma" to "حوالة صادرة مقبولة\nالمبلغ: 1,250.00 SAR\nالمستفيد: مؤسسة السكن العقارية\nمرجع رقم: INM773910",
+                "Alinma" to "حوالة صادرة مقبولة\nالمبلغ: 1,250.00 SAR\nحساب: *2000\nالمستفيد: مؤسسة السكن العقارية\nمرجع رقم: INM773910",
                 "AlRajhiBank" to "إشعار استرداد مبلغ\nبمبلغ: SAR 45.00\nلدى: صيدلية النهدي\nمرجع: RJ9910234",
                 "RiyadBank" to "سداد فاتورة سداد\nمفوتر: الشركة السعودية للكهرباء\nالمبلغ: 390.25 ريال\nمرجع: SADAD55201",
-                "CIB" to "تم خصم مبلغ 420.00 ج.م ببطاقة CIB لدى سوبرماركت كارفور بتاريخ 18/10/2026 مرجع CIB90123",
-                "AlRajhiBank" to "عزيزي العميل، الرصيد المتاح في حسابكم الجاري هو 12,450.00 ر.س",
-                "PromoSMS" to "عرض خاص! احصل على خصم 30% بمناسبة نهاية الأسبوع عند التسوق من متجرنا",
-                "Alinma" to "إشعار عملية بنكية لحسابكم لدى التاجر متجر الإلكترونيات بدون تحديد قيمة"
+                "Alinma" to "تم تفعيل مستفيد بنجاح في مصرف الإنماء، رمز التحقق OTP هو 8821 لا تشاركه مع أحد",
+                "AlRajhiBank" to "تسجيل دخول لحسابكم في مباشر الأفراد، كلمة المرور المؤقتة: 4419",
+                "AlRajhiBank" to "عزيزي العميل، الرصيد المتاح في حسابكم الجاري هو 12,450.00 ر.س"
             )
             var count = 0
             for ((sender, text) in samples) {
                 val id = repository.ingestBankSms(sender, text, isTestSandbox = true)
                 if (id != null && id > 0L) count++
             }
-            showBanner("تم تحليل حزمة الرسائل التجريبية في بيئة الاختبار المنفصلة ($count مقترح للمراجعة)")
+            showBanner("تم تحليل الرسائل (تم استبعاد رسائل التفعيل وOTP تلقائياً وإضافة $count عملية مالية للمراجعة)")
         }
     }
 
@@ -536,9 +559,9 @@ class SaidiQershViewModel(
                 overrideNotes = overrideNotes
             )
             if (txId != null) {
-                showBanner("تم تأكيد العملية وتسجيلها وتحديث الأرصدة والميزانية مرة واحدة")
+                showBanner("تمت إضافة العملية وتسجيلها وتحديث الأرصدة والميزانية بنجاح")
             } else {
-                showBanner("تعذر تأكيد العملية (ربما تم تأكيدها مسبقًا أو أن المبلغ غير محدد)")
+                showBanner("يرجى تحديد المبلغ أولاً قبل إضافة العملية")
             }
         }
     }
@@ -563,7 +586,7 @@ class SaidiQershViewModel(
                 newAccountId = accountId,
                 newType = type
             )
-            showBanner("تم تحديث بيانات العملية المقترحة، يمكنك الآن تأكيدها")
+            showBanner("تم تحديث بيانات العملية المقترحة، يمكنك الآن الضغط على «أضف»")
         }
     }
 

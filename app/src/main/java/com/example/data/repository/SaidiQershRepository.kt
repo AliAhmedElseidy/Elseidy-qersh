@@ -7,13 +7,6 @@ import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject
 
-/**
- * مستودع البيانات المحلي لتطبيق «الصعيدي قرش».
- * يضمن:
- * - فصل التحويلات بين الحسابات عن المصروفات والدخل.
- * - احتساب الاسترداد المالي كخصم من إجمالي المصروفات (دون تضخيم الدخل العادي).
- * - استبعاد جميع العمليات المعلقة (Pending) أو غير الواضحة أو المرفوضة من الإجماليات والتقارير المؤكدة.
- */
 class SaidiQershRepository(private val dao: SaidiQershDao) {
 
     val banksFlow: Flow<List<BankEntity>> = dao.observeBanks()
@@ -114,10 +107,6 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
     }
 
     // ==================== معالجة ومراجعة رسائل البنوك ====================
-    /**
-     * يستقبل نص رسالة بنكية (من الـ BroadcastReceiver أو صندوق الوارد أو مختبر الفحص)
-     * ويحولها إلى مقترح للمراجعة دون المساس بالعمليات المؤكدة.
-     */
     suspend fun ingestBankSms(
         senderAddress: String,
         rawBody: String,
@@ -127,6 +116,7 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
         val banks = dao.getAllBanks()
         val rules = dao.getActiveSmsRules()
         val categories = dao.getAllCategories()
+        val accounts = dao.getAllAccounts()
 
         val parsed = BankSmsParserEngine.parseSms(
             senderAddress = senderAddress,
@@ -134,41 +124,42 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
             smsTimestamp = smsTimestamp,
             knownBanks = banks,
             customRules = rules,
-            categories = categories
+            categories = categories,
+            accounts = accounts
         )
 
         if (!parsed.isBankSmsEnabled && !isTestSandbox) {
             return null
         }
 
-        if (parsed.suggestedType == SmsSuggestedType.BALANCE_NOTICE_ONLY) {
+        // الفلترة التلقائية للرسائل غير المالية (تفعيل مستفيد، OTP، تسجيل دخول، إشعار رصيد...)
+        if (parsed.suggestedType == SmsSuggestedType.BALANCE_NOTICE_ONLY || parsed.reviewStatus == ReviewStatus.IGNORED) {
             dao.insertAuditLog(
                 ImportAuditLogEntity(
                     eventType = "SMS_BALANCE_NOTICE",
                     entityType = "SMS",
                     sourceDescription = parsed.bankName,
-                    details = "رسالة إشعار رصيد/غير مالية تم تجاهلها: ${parsed.sanitizedSnippet}",
+                    details = "رسالة غير مالية / إشعار رصيد تم استبعاده تلقائياً: ${parsed.sanitizedSnippet}",
                     reviewStatus = ReviewStatus.IGNORED.name
                 )
             )
             return null
         }
 
-        // منع التكرار ببصمة الرسالة
         val existingByHash = dao.getSuggestedByHash(parsed.messageHash)
         if (existingByHash != null) {
             return null
         }
 
-        // فحص تكرار رقم المرجع لنفس البنك
         val existingByRef = parsed.referenceNumber?.let { ref ->
             dao.getSuggestedByRefAndBank(ref, parsed.bankName)
         }
 
-        val accounts = dao.getAllAccounts()
-        val matchedAccount = accounts.firstOrNull {
-            it.smsParsingEnabled && (parsed.matchedBankId != null && it.bankId == parsed.matchedBankId)
-        } ?: accounts.firstOrNull { it.smsParsingEnabled }
+        val matchedAccount = parsed.matchedAccountId?.let { id -> accounts.firstOrNull { it.id == id } }
+            ?: accounts.firstOrNull {
+                it.smsParsingEnabled && (parsed.matchedBankId != null && it.bankId == parsed.matchedBankId)
+            }
+            ?: accounts.firstOrNull { it.smsParsingEnabled }
 
         val status = if (existingByRef != null) ReviewStatus.DUPLICATE else parsed.reviewStatus
 
@@ -186,6 +177,8 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
             suggestedCategoryId = parsed.suggestedCategoryId,
             suggestedCategoryName = parsed.suggestedCategoryName,
             suggestedAccountId = matchedAccount?.id,
+            extractedAccountLast4 = parsed.extractedAccountLast4,
+            extractedCardLast4 = parsed.extractedCardLast4,
             status = status,
             isTestSandbox = isTestSandbox,
             smsTimestamp = parsed.smsTimestamp
@@ -381,7 +374,7 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
 
         val root = JSONObject()
         root.put("app", "SaidiQersh")
-        root.put("schemaVersion", 1)
+        root.put("schemaVersion", 2)
         root.put("exportedAt", System.currentTimeMillis())
 
         val accArr = JSONArray()
@@ -395,6 +388,8 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
                     put("currency", a.currency)
                     put("openingBalanceMinor", a.openingBalanceMinor)
                     put("currentBalanceMinor", a.currentBalanceMinor)
+                    put("accountLast4", a.accountLast4)
+                    put("cardLast4", a.cardLast4)
                 }
             )
         }
@@ -407,6 +402,7 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
                     put("id", c.id)
                     put("nameAr", c.nameAr)
                     put("type", c.type.name)
+                    put("iconName", c.iconName)
                     put("colorHex", c.colorHex)
                 }
             )
@@ -443,9 +439,6 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
         }
     }
 
-    /**
-     * استيراد نسخة احتياطية بعد التحقق من صحتها وتوقيعها.
-     */
     suspend fun restoreLocalBackupJson(payload: String, passphrase: String? = null): Result<Int> {
         return try {
             val plainJson = if (payload.trim().startsWith("SQENC1:")) {
@@ -476,7 +469,9 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
                         bankName = obj.optString("bankName", ""),
                         currency = obj.optString("currency", "SAR"),
                         openingBalanceMinor = obj.optLong("openingBalanceMinor", 0L),
-                        currentBalanceMinor = obj.optLong("currentBalanceMinor", 0L)
+                        currentBalanceMinor = obj.optLong("currentBalanceMinor", 0L),
+                        accountLast4 = obj.optString("accountLast4", ""),
+                        cardLast4 = obj.optString("cardLast4", "")
                     )
                 )
             }
@@ -526,12 +521,6 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
     }
 
     companion object {
-        /**
-         * حساب الإجماليات المالية بدقة:
-         * - صافي المصروفات = مجموع (EXPENSE + OBLIGATION_PAYMENT) مطروحًا منه الاستردادات (REFUND).
-         * - لا يُحتسب الاسترداد دخلًا عاديًا!
-         * - لا تُحتسب التحويلات بين الحسابات (TRANSFER) ولا سداد البطاقة ضمن المصروفات أو الدخل.
-         */
         fun computeNetConfirmedExpensesMinor(transactions: List<TransactionEntity>): Long {
             val grossExpenses = transactions
                 .filter { it.type == TransactionType.EXPENSE || it.type == TransactionType.OBLIGATION_PAYMENT }

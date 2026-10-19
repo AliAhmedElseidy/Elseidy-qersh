@@ -2,18 +2,25 @@ package com.example.ui.screens
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
 import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CompareArrows
 import androidx.compose.material.icons.filled.*
@@ -24,18 +31,28 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.data.local.*
+import com.example.domain.BankSmsParserEngine
 import com.example.domain.MoneyUtils
 import com.example.domain.VoiceExpenseProposal
 import com.example.ui.DashboardSummary
 import com.example.ui.TransactionFilterState
 import com.example.ui.components.CategorySpendingDonutChart
 import com.example.ui.components.MonthlyComparisonBarChart
+import com.example.ui.components.parseColorSafe
 import com.example.ui.theme.*
 
 @Composable
@@ -242,13 +259,13 @@ fun DashboardScreen(
                             )
                             Column {
                                 Text(
-                                    text = "لديك ${summary.pendingSmsCount} عملية مقترحة و ${summary.unclearSmsCount} غير واضحة",
+                                    text = "لديك ${summary.pendingSmsCount + summary.unclearSmsCount} رسالة بنكية بانتظار المراجعة",
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer
                                 )
                                 Text(
-                                    text = "لا تدخل في المصروفات المؤكدة إلا بعد مراجعتك وتأكيدك",
+                                    text = "اضغط لمراجعتها وإضافتها بضغطة زر",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
                                 )
@@ -384,19 +401,21 @@ fun DashboardScreen(
                             style = MaterialTheme.typography.titleSmall
                         )
                         Text(
-                            text = "استخدم الأزرار السريعة أعلاه لإضافة مصروف أو دخل أو راجع رسائل البنوك المقترحة.",
+                            text = "اضغط على الزر العائم (+) لاختيار طريقة التسجيل (بالصوت، تصوير إيصال، رسالة بنك، أو يدويًا).",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
                         )
                     }
                 }
             }
         } else {
             items(recentTransactions.take(8), key = { it.id }) { tx ->
+                val catObj = tx.categoryId?.let { catMap[it] }
                 TransactionRowCard(
                     tx = tx,
                     accountName = accMap[tx.accountId]?.name ?: "حساب رئيسي",
-                    categoryName = tx.categoryId?.let { catMap[it]?.nameAr } ?: tx.type.titleAr,
+                    categoryName = catObj?.let { "${it.iconName} ${it.nameAr}" } ?: tx.type.titleAr,
                     onEdit = { onEditTransaction(tx) },
                     onDeleteRequest = { txToDelete = tx }
                 )
@@ -644,7 +663,6 @@ fun TransactionsManagementScreen(
             }
         }
 
-        // أزرار إضافة العمليات (مصروف، دخل، تحويل، استرداد مالي)
         item {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 item {
@@ -785,10 +803,11 @@ fun TransactionsManagementScreen(
             }
         } else {
             items(transactions, key = { it.id }) { tx ->
+                val catObj = tx.categoryId?.let { catMap[it] }
                 TransactionRowCard(
                     tx = tx,
                     accountName = accMap[tx.accountId]?.name ?: "حساب",
-                    categoryName = tx.categoryId?.let { catMap[it]?.nameAr } ?: tx.type.titleAr,
+                    categoryName = catObj?.let { "${it.iconName} ${it.nameAr}" } ?: tx.type.titleAr,
                     onEdit = { onEditTransaction(tx) },
                     onDeleteRequest = { txToDelete = tx }
                 )
@@ -830,12 +849,209 @@ fun TransactionsManagementScreen(
     }
 }
 
+/**
+ * ثالثاً: القائمة السفلية الذكية للزر العائم (+) بعنوان "تسجّل إزاي؟"
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SmartActionBottomSheet(
+    onDismiss: () -> Unit,
+    onSelectVoice: () -> Unit,
+    onSelectScanReceipt: () -> Unit,
+    onSelectPasteBankSms: () -> Unit,
+    onSelectManualTransaction: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "تسجّل إزاي؟",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("action_sheet_title"),
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // 1. 🎤 سجّل بصوتك (مع شارة AI)
+            SmartActionOptionCard(
+                emoji = "🎤",
+                title = "سجّل بصوتك",
+                subtitle = "قول المصروف بدل ما تكتبه",
+                showAiBadge = true,
+                onClick = {
+                    onDismiss()
+                    onSelectVoice()
+                },
+                testTag = "sheet_option_voice"
+            )
+
+            // 2. 📷 صوّر إيصال (مع شارة AI)
+            SmartActionOptionCard(
+                emoji = "📷",
+                title = "صوّر إيصال",
+                subtitle = "التقط صورة الفاتورة واستخرج المبلغ والتاجر منها تلقائياً",
+                showAiBadge = true,
+                onClick = {
+                    onDismiss()
+                    onSelectScanReceipt()
+                },
+                testTag = "sheet_option_receipt"
+            )
+
+            // 3. 📋 رسالة بنك (مع شارة AI)
+            SmartActionOptionCard(
+                emoji = "📋",
+                title = "رسالة بنك",
+                subtitle = "الصق نص رسالة بنكية وسيقوم التطبيق بفهمها وتحليلها فوراً",
+                showAiBadge = true,
+                onClick = {
+                    onDismiss()
+                    onSelectPasteBankSms()
+                },
+                testTag = "sheet_option_bank_sms"
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // 4. زر رئيسي كبير في الأسفل بعرض الشاشة: 💵 مصروف / دخل جديد
+            Button(
+                onClick = {
+                    onDismiss()
+                    onSelectManualTransaction()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .testTag("sheet_option_manual_tx"),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary
+                )
+            ) {
+                Text(
+                    text = "💵 مصروف / دخل جديد",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun SmartActionOptionCard(
+    emoji: String,
+    title: String,
+    subtitle: String,
+    showAiBadge: Boolean,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .testTag(testTag),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(48.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(text = emoji, fontSize = 22.sp)
+                }
+            }
+
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (showAiBadge) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = SaidiGoldPrimary
+                        ) {
+                            Text(
+                                text = "AI ✨",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF1F1705),
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Icon(
+                imageVector = Icons.Default.ChevronLeft,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * رابعاً: شاشة "إضافة مصروف / دخل جديد" (Add Transaction Modal) بالتصميم السريع والعملي الجديد:
+ * 1. أزرار التبديل في الأعلى (مصروف | دخل | استرداد مالي | تحويل بين الحسابات)
+ * 2. Hero Amount Input في منتصف البطاقة العلوية بخط كبير جداً + زر "أدخل بعملة تانية"
+ * 3. مفتاح تبديل "دفع التزام شهري؟"
+ * 4. حقل نصي واحد نظيف بعنوان "الوصف" (مثلاً: كارفور، بنزين، دانكن... اختياري)
+ * 5. أزرار اختيار سريعة للحساب (حساب الإنماء، حساب الراجحي، المحفظة النقدية)
+ * 6. شبكة التصنيفات (Category Grid من 4 أعمدة) مع أيقونات تعبيرية ملونة وتمييز التصنيف المختار بإطار ملون وخلفية خفيفة
+ * 7. زر عريض وبارز في الأسفل "احفظ العملية"
+ */
 @Composable
 fun TransactionFormDialog(
     initialType: TransactionType,
     editingTransaction: TransactionEntity?,
+    initialAmountText: String = "",
+    initialDescription: String = "",
+    initialCategoryId: Long? = null,
+    initialAccountId: Long? = null,
     accounts: List<AccountEntity>,
     categories: List<CategoryEntity>,
+    obligations: List<ObligationEntity> = emptyList(),
     onDismiss: () -> Unit,
     onSave: (
         existingId: Long,
@@ -847,143 +1063,764 @@ fun TransactionFormDialog(
         accountId: Long,
         toAccountId: Long?,
         categoryId: Long?,
-        merchantName: String
+        merchantName: String,
+        isMonthlyObligation: Boolean,
+        linkedObligationId: Long?
     ) -> Unit
 ) {
     var selectedType by remember { mutableStateOf(editingTransaction?.type ?: initialType) }
     var amountText by remember {
-        mutableStateOf(editingTransaction?.let { MoneyUtils.formatPlainDecimal(it.amountMinor) } ?: "")
+        mutableStateOf(
+            editingTransaction?.let { MoneyUtils.formatPlainDecimal(it.amountMinor) }
+                ?: initialAmountText
+        )
     }
     var currency by remember { mutableStateOf(editingTransaction?.currency ?: "SAR") }
-    var description by remember { mutableStateOf(editingTransaction?.description ?: "") }
-    var merchantName by remember { mutableStateOf(editingTransaction?.merchantName ?: "") }
-    var notes by remember { mutableStateOf(editingTransaction?.notes ?: "") }
+    var showCurrencyPicker by remember { mutableStateOf(false) }
+
+    var isMonthlyObligation by remember {
+        mutableStateOf(editingTransaction?.isMonthlyObligationPayment == true)
+    }
+    var selectedObligationId by remember {
+        mutableStateOf(editingTransaction?.obligationId ?: obligations.firstOrNull { !it.isCompleted }?.id)
+    }
+
+    var description by remember {
+        mutableStateOf(editingTransaction?.description ?: initialDescription)
+    }
     var selectedAccountId by remember {
-        mutableStateOf(editingTransaction?.accountId ?: accounts.firstOrNull()?.id ?: 1L)
+        mutableStateOf(
+            editingTransaction?.accountId
+                ?: initialAccountId
+                ?: accounts.firstOrNull()?.id
+                ?: 1L
+        )
     }
     var selectedToAccountId by remember {
         mutableStateOf(editingTransaction?.toAccountId ?: accounts.drop(1).firstOrNull()?.id)
     }
-    var selectedCategoryId by remember {
-        mutableStateOf(editingTransaction?.categoryId ?: categories.firstOrNull()?.id)
+
+    val filteredCategories = remember(categories, selectedType) {
+        if (selectedType == TransactionType.INCOME) {
+            categories.filter { it.type == CategoryType.INCOME || it.type == CategoryType.BOTH }
+                .ifEmpty { categories }
+        } else {
+            categories.filter { it.type == CategoryType.EXPENSE || it.type == CategoryType.BOTH }
+                .ifEmpty { categories }
+        }
+    }
+
+    var selectedCategoryId by remember(selectedType) {
+        mutableStateOf(
+            editingTransaction?.categoryId
+                ?: initialCategoryId
+                ?: filteredCategories.firstOrNull()?.id
+        )
     }
 
     val currencies = listOf("SAR", "EGP", "AED", "KWD", "USD")
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        title = {
-            Text(
-                if (editingTransaction == null) "إضافة ${selectedType.titleAr}"
-                else "تعديل عملية مالية"
-            )
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(
-                        listOf(
-                            TransactionType.EXPENSE,
-                            TransactionType.INCOME,
-                            TransactionType.REFUND,
-                            TransactionType.TRANSFER
-                        )
-                    ) { t ->
-                        FilterChip(
-                            selected = selectedType == t,
-                            onClick = { selectedType = t },
-                            label = { Text(t.titleAr) }
-                        )
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp, vertical = 20.dp),
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.background
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
+                // شريط علوي للإغلاق والعنوان
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (editingTransaction == null) "إضافة مصروف / دخل جديد" else "تعديل العملية المالية",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "إغلاق")
                     }
                 }
 
-                if (selectedType == TransactionType.REFUND) {
-                    Text(
-                        text = "ملاحظة: يُخصم الاسترداد المالي من إجمالي المصروفات ويعيد المبلغ للحساب دون احتسابه دخلًا عاديًا.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = RefundTeal
-                    )
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = amountText,
-                        onValueChange = { amountText = it },
-                        label = { Text("المبلغ") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        singleLine = true,
-                        modifier = Modifier.weight(1.4f).testTag("tx_form_amount_input")
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("العملة", style = MaterialTheme.typography.labelMedium)
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            items(currencies) { cur ->
-                                FilterChip(
-                                    selected = currency == cur,
-                                    onClick = { currency = cur },
-                                    label = { Text(MoneyUtils.currencySymbol(cur)) }
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    // 1. نوع العملية في الأعلى: أزرار التبديل (مصروف | دخل | استرداد مالي | تحويل بين الحسابات)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f))
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        val types = listOf(
+                            TransactionType.EXPENSE to "مصروف",
+                            TransactionType.INCOME to "دخل",
+                            TransactionType.REFUND to "استرداد مالي",
+                            TransactionType.TRANSFER to "تحويل"
+                        )
+                        types.forEach { (t, label) ->
+                            val isSelected = selectedType == t
+                            Surface(
+                                onClick = { selectedType = t },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp)
                                 )
                             }
                         }
                     }
+
+                    // 2. إدخال المبلغ (Hero Amount Input) بخط كبير جداً وواضح + زر "أدخل بعملة تانية"
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 18.dp, horizontal = 16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                BasicTextField(
+                                    value = amountText,
+                                    onValueChange = { amountText = it },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    singleLine = true,
+                                    textStyle = TextStyle(
+                                        fontFamily = CairoFontFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 36.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        textAlign = TextAlign.Center
+                                    ),
+                                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                    decorationBox = { innerTextField ->
+                                        Box(contentAlignment = Alignment.Center) {
+                                            if (amountText.isEmpty()) {
+                                                Text(
+                                                    text = "0",
+                                                    fontSize = 36.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                                )
+                                            }
+                                            innerTextField()
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .widthIn(min = 90.dp, max = 220.dp)
+                                        .testTag("tx_form_amount_input")
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = MoneyUtils.currencySymbol(currency),
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            TextButton(
+                                onClick = { showCurrencyPicker = !showCurrencyPicker },
+                                modifier = Modifier.testTag("toggle_currency_picker_btn")
+                            ) {
+                                Icon(Icons.Default.CurrencyExchange, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("أدخل بعملة تانية (${MoneyUtils.currencySymbol(currency)})")
+                            }
+
+                            if (showCurrencyPicker) {
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    items(currencies) { cur ->
+                                        FilterChip(
+                                            selected = currency == cur,
+                                            onClick = {
+                                                currency = cur
+                                                showCurrencyPicker = false
+                                            },
+                                            label = { Text("${MoneyUtils.currencySymbol(cur)} ($cur)") }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. خيار التزام شهري: مفتاح تبديل أنيق "دفع التزام شهري؟"
+                    if (selectedType == TransactionType.EXPENSE) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.EventRepeat,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                        Text(
+                                            text = "دفع التزام شهري؟",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Switch(
+                                        checked = isMonthlyObligation,
+                                        onCheckedChange = { isMonthlyObligation = it },
+                                        modifier = Modifier.testTag("monthly_obligation_switch")
+                                    )
+                                }
+
+                                if (isMonthlyObligation && obligations.isNotEmpty()) {
+                                    Spacer(Modifier.height(6.dp))
+                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        items(obligations.filter { !it.isCompleted }) { obl ->
+                                            FilterChip(
+                                                selected = selectedObligationId == obl.id,
+                                                onClick = {
+                                                    selectedObligationId = obl.id
+                                                    if (description.isBlank()) description = obl.title
+                                                },
+                                                label = { Text(obl.title) }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 4. حقل الوصف: حقل نصي واحد نظيف بعنوان "الوصف"
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { description = it },
+                        label = { Text("الوصف") },
+                        placeholder = { Text("مثلاً: كارفور، بنزين، دانكن... اختياري") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("tx_form_desc_input")
+                    )
+
+                    // 5. اختيار الحساب: أزرار اختيار سريعة وواضحة للحساب (حساب الإنماء، حساب الراجحي، المحفظة النقدية)
+                    if (accounts.isNotEmpty()) {
+                        Text(
+                            text = if (selectedType == TransactionType.TRANSFER) "من الحساب:" else "اختيار الحساب:",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(accounts) { acc ->
+                                val isAccSelected = selectedAccountId == acc.id
+                                FilterChip(
+                                    selected = isAccSelected,
+                                    onClick = {
+                                        selectedAccountId = acc.id
+                                        currency = acc.currency
+                                    },
+                                    label = {
+                                        Text(
+                                            text = if (acc.accountLast4.isNotBlank()) "${acc.name} (*${acc.accountLast4})" else acc.name,
+                                            fontWeight = if (isAccSelected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = if (acc.type == AccountType.CASH) Icons.Default.Payments else Icons.Default.AccountBalance,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    if (selectedType == TransactionType.TRANSFER && accounts.size > 1) {
+                        Text(
+                            text = "إلى الحساب المستلم:",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(accounts.filter { it.id != selectedAccountId }) { acc ->
+                                FilterChip(
+                                    selected = selectedToAccountId == acc.id,
+                                    onClick = { selectedToAccountId = acc.id },
+                                    label = { Text(acc.name) }
+                                )
+                            }
+                        }
+                    }
+
+                    // 6. شبكة التصنيفات (Category Grid View من 4 أعمدة)
+                    if (selectedType != TransactionType.TRANSFER && filteredCategories.isNotEmpty()) {
+                        Text(
+                            text = "التصنيف:",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        CategoryFourColumnGrid(
+                            categories = filteredCategories,
+                            selectedCategoryId = selectedCategoryId,
+                            onSelectCategory = { selectedCategoryId = it.id }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // 7. زر عريض وبارز في أسفل الشاشة "احفظ العملية"
+                Button(
+                    onClick = {
+                        onSave(
+                            editingTransaction?.id ?: 0L,
+                            selectedType,
+                            amountText,
+                            currency,
+                            description,
+                            editingTransaction?.notes ?: "",
+                            selectedAccountId,
+                            if (selectedType == TransactionType.TRANSFER) selectedToAccountId else null,
+                            selectedCategoryId,
+                            editingTransaction?.merchantName ?: "",
+                            isMonthlyObligation,
+                            if (isMonthlyObligation) selectedObligationId else null
+                        )
+                        onDismiss()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .testTag("tx_form_save_btn"),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(
+                        text = "احفظ العملية",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * شبكة مربعات التصنيفات (Grid من 4 أعمدة) مع أيقونة تعبيرية ملونة وتمييز التصنيف المختار بإطار ملون وخلفية خفيفة.
+ */
+@Composable
+fun CategoryFourColumnGrid(
+    categories: List<CategoryEntity>,
+    selectedCategoryId: Long?,
+    onSelectCategory: (CategoryEntity) -> Unit
+) {
+    val rows = remember(categories) { categories.chunked(4) }
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        rows.forEach { rowItems ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rowItems.forEach { cat ->
+                    val isSelected = selectedCategoryId == cat.id
+                    val accentColor = parseColorSafe(cat.colorHex, SaidiGreenPrimary)
+                    val bgColor = if (isSelected) {
+                        accentColor.copy(alpha = 0.16f)
+                    } else {
+                        MaterialTheme.colorScheme.surface
+                    }
+                    val borderColor = if (isSelected) {
+                        accentColor
+                    } else {
+                        MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(78.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(bgColor)
+                            .border(
+                                width = if (isSelected) 2.dp else 1.dp,
+                                color = borderColor,
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .clickable { onSelectCategory(cat) }
+                            .padding(6.dp)
+                            .testTag("cat_grid_item_${cat.nameAr}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = getCategoryEmoji(cat),
+                                fontSize = 22.sp
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = cat.nameAr,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                color = if (isSelected) accentColor else MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
+                repeat(4 - rowItems.size) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+fun getCategoryEmoji(cat: CategoryEntity): String {
+    if (cat.iconName.any { Character.getType(it).toByte() == Character.OTHER_SYMBOL || it.code > 0x1F000 }) {
+        return cat.iconName
+    }
+    return when (cat.nameAr) {
+        "بقالة", "مقاضي البيت والتموين" -> "🛒"
+        "أكل بره", "المطاعم والكافيهات" -> "🍔"
+        "مواصلات" -> "🚕"
+        "تسوق", "التسوق والمشتريات" -> "🛍️"
+        "فواتير", "الفواتير والاتصالات" -> "🧾"
+        "اشتراكات" -> "📺"
+        "سفر" -> "✈️"
+        "صحة", "الصحةوالصيدلية" -> "💊"
+        "عناية شخصية" -> "✨"
+        "إيجار", "السكن والإيجار" -> "🏠"
+        "تعليم", "التعليم والأسرة" -> "🎓"
+        "بنزين", "الوقود والمواصلات" -> "⛽"
+        "أقساط" -> "💳"
+        "جمعيات" -> "🤝"
+        "أولاد" -> "🧸"
+        "الراتب الشهري" -> "💰"
+        "عمل حر ومكافآت" -> "🏆"
+        "عوائد واستثمارات" -> "📈"
+        else -> "📦"
+    }
+}
+
+/**
+ * نافذة "📷 صوّر إيصال" (مع شارة AI): التقاط أو اختيار صورة الفاتورة واستخراج المبلغ والتاجر منها تلقائياً.
+ */
+@Composable
+fun ScanReceiptDialog(
+    categories: List<CategoryEntity>,
+    onDismiss: () -> Unit,
+    onReceiptExtracted: (amountText: String, merchantName: String, categoryId: Long?) -> Unit
+) {
+    var receiptAmount by remember { mutableStateOf("84.50") }
+    var receiptMerchant by remember { mutableStateOf("أسواق بقالة وكارفور") }
+    var receiptTextInput by remember { mutableStateOf("فاتورة ضريبية مبسطة - كارفور\nالإجمالي شامل الضريبة: 84.50 ريال") }
+    var hasCapturedImage by remember { mutableStateOf(false) }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicturePreview()
+    ) { bitmap: Bitmap? ->
+        if (bitmap != null) {
+            hasCapturedImage = true
+        }
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            hasCapturedImage = true
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("📷 صوّر إيصال")
+                Surface(shape = RoundedCornerShape(6.dp), color = SaidiGoldPrimary) {
+                    Text(
+                        text = "AI ✨",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF1F1705),
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "التقط صورة الفاتورة بالكاميرا أو اخترها من المعرض، أو الصق نص الإيصال لاستخراج المبلغ والتاجر تلقائياً:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { cameraLauncher.launch(null) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("الكاميرا")
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            galleryLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("المعرض")
+                    }
+                }
+
+                if (hasCapturedImage) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = IncomeGreen.copy(alpha = 0.14f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "✓ تم التقاط صورة الفاتورة واستخراج البيانات أدناه، يمكنك مراجعتها قبل المتابعة:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = IncomeGreen,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
                 }
 
                 OutlinedTextField(
-                    value = description,
-                    onValueChange = { description = it },
-                    label = { Text("وصف العملية") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag("tx_form_desc_input")
-                )
-
-                OutlinedTextField(
-                    value = notes,
-                    onValueChange = { notes = it },
-                    label = { Text("ملاحظات إضافية (اختياري)") },
-                    singleLine = true,
+                    value = receiptTextInput,
+                    onValueChange = {
+                        receiptTextInput = it
+                        val parsed = BankSmsParserEngine.parseSms("Receipt", it, categories = categories)
+                        parsed.extractedAmountMinor?.let { minor ->
+                            receiptAmount = MoneyUtils.formatPlainDecimal(minor)
+                        }
+                        if (parsed.merchantName.isNotBlank()) {
+                            receiptMerchant = parsed.merchantName
+                        }
+                    },
+                    label = { Text("نص الفاتورة المستخرج") },
+                    minLines = 2,
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                if (accounts.isNotEmpty()) {
-                    Text(
-                        text = if (selectedType == TransactionType.TRANSFER) "من الحساب:" else "الحساب:",
-                        style = MaterialTheme.typography.labelLarge
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = receiptAmount,
+                        onValueChange = { receiptAmount = it },
+                        label = { Text("المبلغ المستخرج") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
                     )
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(accounts) { acc ->
-                            FilterChip(
-                                selected = selectedAccountId == acc.id,
-                                onClick = {
-                                    selectedAccountId = acc.id
-                                    currency = acc.currency
-                                },
-                                label = { Text(acc.name) }
-                            )
+                    OutlinedTextField(
+                        value = receiptMerchant,
+                        onValueChange = { receiptMerchant = it },
+                        label = { Text("التاجر / المتجر") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1.2f)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val bokaCatId = categories.firstOrNull { it.nameAr == "بقالة" }?.id ?: categories.firstOrNull()?.id
+                    onReceiptExtracted(receiptAmount, receiptMerchant, bokaCatId)
+                }
+            ) {
+                Text("متابعة وحفظ الفاتورة")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("إلغاء") }
+        }
+    )
+}
+
+/**
+ * نافذة "📋 رسالة بنك" (مع شارة AI): لصق نص رسالة بنكية وتحليلها فوراً مع عرض المعاينة الذكية.
+ */
+@Composable
+fun PasteBankSmsModalDialog(
+    accounts: List<AccountEntity>,
+    banks: List<BankEntity>,
+    categories: List<CategoryEntity>,
+    onDismiss: () -> Unit,
+    onAddToReviewQueue: (sender: String, body: String) -> Unit,
+    onConfirmDirectly: (amountText: String, currency: String, merchant: String, accountId: Long, categoryId: Long?) -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+    var smsText by remember {
+        mutableStateOf("شراء عبر Samsung Wallet مبلغ: ريال سعودى 10 بطاقة مدى: *5650 حساب: *2000 من: dani est")
+    }
+
+    val liveParsed = remember(smsText, accounts, banks, categories) {
+        BankSmsParserEngine.parseSms(
+            senderAddress = "Alinma",
+            rawBody = smsText,
+            knownBanks = banks,
+            categories = categories,
+            accounts = accounts
+        )
+    }
+
+    val matchedAccName = remember(liveParsed.matchedAccountId, accounts) {
+        accounts.firstOrNull { it.id == liveParsed.matchedAccountId }?.name ?: "حساب الإنماء"
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("📋 رسالة بنك")
+                Surface(shape = RoundedCornerShape(6.dp), color = SaidiGoldPrimary) {
+                    Text(
+                        text = "AI ✨",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF1F1705),
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "الصق نص الرسالة البنكية لتحليلها فوراً:",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    TextButton(
+                        onClick = {
+                            clipboard.getText()?.text?.let {
+                                if (it.isNotBlank()) smsText = it
+                            }
                         }
+                    ) {
+                        Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("لصق من الحافظة")
                     }
                 }
 
-                if (selectedType == TransactionType.TRANSFER && accounts.size > 1) {
-                    Text(text = "إلى الحساب المستلم:", style = MaterialTheme.typography.labelLarge)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(accounts.filter { it.id != selectedAccountId }) { acc ->
-                            FilterChip(
-                                selected = selectedToAccountId == acc.id,
-                                onClick = { selectedToAccountId = acc.id },
-                                label = { Text(acc.name) }
-                            )
-                        }
-                    }
-                }
+                OutlinedTextField(
+                    value = smsText,
+                    onValueChange = { smsText = it },
+                    label = { Text("نص الرسالة البنكية") },
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth().testTag("paste_sms_modal_input")
+                )
 
-                if (selectedType != TransactionType.TRANSFER && categories.isNotEmpty()) {
-                    Text(text = "التصنيف:", style = MaterialTheme.typography.labelLarge)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(categories) { cat ->
-                            FilterChip(
-                                selected = selectedCategoryId == cat.id,
-                                onClick = { selectedCategoryId = cat.id },
-                                label = { Text(cat.nameAr) }
+                // بطاقة نتيجة الفهم الفوري
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (liveParsed.reviewStatus == ReviewStatus.IGNORED) {
+                            Text(
+                                text = "⚠️ رسالة غير مالية (تفعيل مستفيد / OTP / تسجيل دخول) - يتم استبعادها تلقائياً.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = WarningAmber,
+                                fontWeight = FontWeight.Bold
+                            )
+                        } else {
+                            Text(
+                                text = "المبلغ المستخرج: ${liveParsed.extractedAmountMinor?.let { MoneyUtils.formatMinorTwoDecimals(it, liveParsed.currency) } ?: "تحديد المبلغ يدوياً"}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "التاجر: ${liveParsed.merchantName.ifBlank { "غير محدد" }} • النوع: ${liveParsed.suggestedType.titleAr}",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "الحساب المطابق تلقائياً: $matchedAccName ${if (liveParsed.extractedAccountLast4.isNotBlank()) "(*${liveParsed.extractedAccountLast4})" else ""}",
+                                style = MaterialTheme.typography.bodySmall
                             )
                         }
                     }
@@ -991,25 +1828,33 @@ fun TransactionFormDialog(
             }
         },
         confirmButton = {
-            Button(
-                onClick = {
-                    onSave(
-                        editingTransaction?.id ?: 0L,
-                        selectedType,
-                        amountText,
-                        currency,
-                        description,
-                        notes,
-                        selectedAccountId,
-                        if (selectedType == TransactionType.TRANSFER) selectedToAccountId else null,
-                        selectedCategoryId,
-                        merchantName
-                    )
-                    onDismiss()
-                },
-                modifier = Modifier.testTag("tx_form_save_btn")
-            ) {
-                Text("حفظ العملية")
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        onAddToReviewQueue("Alinma", smsText)
+                        onDismiss()
+                    }
+                ) {
+                    Text("لقائمة المراجعة")
+                }
+                Button(
+                    enabled = liveParsed.extractedAmountMinor != null && liveParsed.extractedAmountMinor > 0L,
+                    onClick = {
+                        val amtStr = liveParsed.extractedAmountMinor?.let { MoneyUtils.formatPlainDecimal(it) } ?: "0"
+                        val accId = liveParsed.matchedAccountId ?: accounts.firstOrNull()?.id ?: 1L
+                        onConfirmDirectly(
+                            amtStr,
+                            liveParsed.currency,
+                            liveParsed.merchantName.ifBlank { liveParsed.suggestedType.titleAr },
+                            accId,
+                            liveParsed.suggestedCategoryId
+                        )
+                        onDismiss()
+                    },
+                    modifier = Modifier.testTag("confirm_pasted_sms_direct_btn")
+                ) {
+                    Text("أضف فوراً")
+                }
             }
         },
         dismissButton = {
@@ -1080,7 +1925,7 @@ private fun CategoryManagerDialog(
                                 .padding(vertical = 6.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(cat.nameAr, style = MaterialTheme.typography.bodyMedium)
+                            Text("${getCategoryEmoji(cat)} ${cat.nameAr}", style = MaterialTheme.typography.bodyMedium)
                             Text(cat.type.titleAr, style = MaterialTheme.typography.bodySmall)
                         }
                     }
@@ -1093,9 +1938,6 @@ private fun CategoryManagerDialog(
     )
 }
 
-/**
- * نافذة الإملاء الصوتي بالعربية مع شاشة المراجعة قبل التسجيل وتوضيح متطلبات تحويل الصوت إلى نص.
- */
 @Composable
 fun VoiceExpenseDialog(
     proposal: VoiceExpenseProposal?,
@@ -1105,7 +1947,6 @@ fun VoiceExpenseDialog(
     onConfirmProposal: (VoiceExpenseProposal, Long, String?, String?, Long?) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val context = LocalContext.current
     var phraseInput by remember { mutableStateOf("دفعت خمسة وثلاثين ريال بنزين") }
     var speechErrorNote by remember { mutableStateOf<String?>(null) }
 
@@ -1135,19 +1976,30 @@ fun VoiceExpenseDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("الإملاء الصوتي للمصروفات بالعربية") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant
-                ) {
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("🎤 سجّل بصوتك")
+                Surface(shape = RoundedCornerShape(6.dp), color = SaidiGoldPrimary) {
                     Text(
-                        text = "تنويه شفافية: يعتمد تحويل الصوت المنطوق إلى نص (Speech-to-Text) على محرك التعرف الصوتي في نظام Android (والذي قد يتطلب اتصالًا بالإنترنت في بعض الهواتف إذا لم تُحمّل حزمة اللغة العربية دون اتصال). أما استخراج المبلغ والوصف والتصنيف فيتم محليًا ١٠٠٪ داخل التطبيق.",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(10.dp)
+                        text = "AI ✨",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF1F1705),
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "قول المصروف بدل ما تكتبه (مثل: «دفعت خمسة وثلاثين ريال بنزين»)، وسيتم استخراج المبلغ والوصف والتصنيف فوراً للمراجعة:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),

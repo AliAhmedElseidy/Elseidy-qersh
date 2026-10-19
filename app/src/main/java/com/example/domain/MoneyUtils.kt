@@ -48,7 +48,7 @@ object MoneyUtils {
     }
 
     /**
-     * يحول نص المبلغ (مثل "1,250.75" أو "١٢٥٠٫٥٠") إلى BigDecimal بدقة خانتين عشريتين.
+     * يحول نص المبلغ (مثل "1,250.75" أو "١٢٥٠٫٥٠" أو "10") إلى BigDecimal بدقة خانتين عشريتين.
      */
     fun parseToBigDecimal(rawText: String): BigDecimal? {
         val cleaned = normalizeDigits(rawText)
@@ -91,8 +91,8 @@ object MoneyUtils {
      */
     fun currencySymbol(currencyCode: String): String {
         return when (currencyCode.uppercase(Locale.ROOT)) {
-            "SAR", "ر.س", "ريال" -> "ر.س"
-            "EGP", "ج.م", "جنيه" -> "ج.م"
+            "SAR", "SR", "ر.س", "ريال", "ريال سعودي", "ريال سعودى" -> "ر.س"
+            "EGP", "LE", "ج.م", "جنيه", "جنيه مصري", "جنيه مصرى" -> "ج.م"
             "AED", "د.إ" -> "د.إ"
             "KWD", "د.ك" -> "د.ك"
             "USD", "$" -> "$"
@@ -119,6 +119,16 @@ object MoneyUtils {
             else -> ""
         }
         return "$signPrefix$absFormatted ${currencySymbol(currencyCode)}"
+    }
+
+    /**
+     * تنسيق المبلغ المالي بخانتين عشريتين دائماً (مثال: "10.00 ر.س") لعرضه في هيدر كارت رسائل البنك.
+     */
+    fun formatMinorTwoDecimals(minorUnits: Long, currencyCode: String = "SAR"): String {
+        val bd = fromMinorUnits(minorUnits)
+        val symbols = DecimalFormatSymbols(Locale.US)
+        val formatter = DecimalFormat("#,##0.00", symbols)
+        return "${formatter.format(bd.abs())} ${currencySymbol(currencyCode)}"
     }
 
     fun formatPlainDecimal(minorUnits: Long): String {

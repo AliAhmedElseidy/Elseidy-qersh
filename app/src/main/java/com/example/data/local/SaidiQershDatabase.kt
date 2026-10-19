@@ -24,7 +24,7 @@ import com.example.domain.MoneyUtils
         ShoppingItemEntity::class,
         ImportAuditLogEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(RoomTypeConverters::class)
@@ -49,10 +49,21 @@ abstract class SaidiQershDatabase : RoomDatabase() {
         }
 
         /**
-         * يجهز البيانات التأسيسية للبنوك والتصنيفات والحسابات الافتراضية عند تشغيل التطبيق لأول مرة.
+         * يجهز البيانات التأسيسية للبنوك والتصنيفات الـ 16 الجديدة والحسابات الافتراضية (حساب الإنماء *2000، حساب الراجحي *4821، المحفظة النقدية).
          */
         suspend fun seedInitialDataIfEmpty(dao: SaidiQershDao) {
             if (dao.getAllBanks().isEmpty()) {
+                val alinmaId = dao.insertBank(
+                    BankEntity(
+                        nameAr = "مصرف الإنماء",
+                        nameEn = "Alinma Bank",
+                        code = "ALINMA",
+                        country = "SA",
+                        defaultCurrency = "SAR",
+                        senderIdsCsv = "Alinma,AlinmaBank,الإنماء,الانماء,مصرف الإنماء",
+                        smsEnabled = true
+                    )
+                )
                 val alRajhiId = dao.insertBank(
                     BankEntity(
                         nameAr = "مصرف الراجحي",
@@ -72,17 +83,6 @@ abstract class SaidiQershDatabase : RoomDatabase() {
                         country = "SA",
                         defaultCurrency = "SAR",
                         senderIdsCsv = "SNB,SNB AlAhli,AlAhli,الأهلي,الاهلي",
-                        smsEnabled = true
-                    )
-                )
-                val alinmaId = dao.insertBank(
-                    BankEntity(
-                        nameAr = "مصرف الإنماء",
-                        nameEn = "Alinma Bank",
-                        code = "ALINMA",
-                        country = "SA",
-                        defaultCurrency = "SAR",
-                        senderIdsCsv = "Alinma,AlinmaBank,الإنماء,الانماء",
                         smsEnabled = true
                     )
                 )
@@ -134,6 +134,15 @@ abstract class SaidiQershDatabase : RoomDatabase() {
                 // قواعد رسائل افتراضية قابلة للتوسعة
                 dao.insertSmsRule(
                     SmsRuleEntity(
+                        bankId = alinmaId,
+                        ruleName = "شراء Samsung Wallet / مدى - الإنماء",
+                        keywordOrRegex = "شراء عبر Samsung Wallet|شراء عبر نقاط البيع|بطاقة مدى",
+                        suggestedType = SmsSuggestedType.CARD_PURCHASE,
+                        priority = 25
+                    )
+                )
+                dao.insertSmsRule(
+                    SmsRuleEntity(
                         bankId = alRajhiId,
                         ruleName = "شراء مدى/أثير - الراجحي",
                         keywordOrRegex = "شراء عبر نقاط البيع|شراء انترنت|شراء أثير|PoS Purchase",
@@ -152,15 +161,6 @@ abstract class SaidiQershDatabase : RoomDatabase() {
                 )
                 dao.insertSmsRule(
                     SmsRuleEntity(
-                        bankId = alinmaId,
-                        ruleName = "سداد فاتورة - الإنماء",
-                        keywordOrRegex = "سداد فاتورة|SADAD Bill",
-                        suggestedType = SmsSuggestedType.BILL_PAYMENT,
-                        priority = 15
-                    )
-                )
-                dao.insertSmsRule(
-                    SmsRuleEntity(
                         bankId = riyadId,
                         ruleName = "حوالة صادرة - بنك الرياض",
                         keywordOrRegex = "حوالة صادرة|تحويل صادر|Outgoing Transfer",
@@ -170,53 +170,108 @@ abstract class SaidiQershDatabase : RoomDatabase() {
                 )
             }
 
-            if (dao.getAllCategories().isEmpty()) {
-                val defaultCategories = listOf(
-                    CategoryEntity(nameAr = "مقاضي البيت والتموين", type = CategoryType.EXPENSE, iconName = "grocery", colorHex = "#0D4732", isDefault = true),
-                    CategoryEntity(nameAr = "الوقود والمواصلات", type = CategoryType.EXPENSE, iconName = "fuel", colorHex = "#C89D42", isDefault = true),
-                    CategoryEntity(nameAr = "المطاعم والكافيهات", type = CategoryType.EXPENSE, iconName = "restaurant", colorHex = "#B85D3B", isDefault = true),
-                    CategoryEntity(nameAr = "الفواتير والاتصالات", type = CategoryType.EXPENSE, iconName = "bills", colorHex = "#285E61", isDefault = true),
-                    CategoryEntity(nameAr = "السكن والإيجار", type = CategoryType.EXPENSE, iconName = "home", colorHex = "#4A5568", isDefault = true),
-                    CategoryEntity(nameAr = "الصحةوالصيدلية", type = CategoryType.EXPENSE, iconName = "health", colorHex = "#9B2C2C", isDefault = true),
-                    CategoryEntity(nameAr = "التعليم والأسرة", type = CategoryType.EXPENSE, iconName = "education", colorHex = "#2B6CB0", isDefault = true),
-                    CategoryEntity(nameAr = "التسوق والمشتريات", type = CategoryType.EXPENSE, iconName = "shopping", colorHex = "#6B46C1", isDefault = true),
-                    CategoryEntity(nameAr = "الراتب الشهري", type = CategoryType.INCOME, iconName = "salary", colorHex = "#1E7E55", isDefault = true),
-                    CategoryEntity(nameAr = "عمل حر ومكافآت", type = CategoryType.INCOME, iconName = "freelance", colorHex = "#D4AF37", isDefault = true),
-                    CategoryEntity(nameAr = "عوائد واستثمارات", type = CategoryType.INCOME, iconName = "investment", colorHex = "#0F766E", isDefault = true)
-                )
-                defaultCategories.forEach { dao.insertCategory(it) }
+            // شبكة التصنيفات الـ 16 المطلوبة مع أيقونات تعبيرية ملونة + تصنيفات الدخل
+            val existingCategories = dao.getAllCategories()
+            val requiredExpenseCategories = listOf(
+                Triple("بقالة", "🛒", "#0D4732"),
+                Triple("أكل بره", "🍔", "#D97706"),
+                Triple("مواصلات", "🚕", "#2563EB"),
+                Triple("تسوق", "🛍️", "#7C3AED"),
+                Triple("فواتير", "🧾", "#0891B2"),
+                Triple("اشتراكات", "📺", "#4F46E5"),
+                Triple("سفر", "✈️", "#0284C7"),
+                Triple("صحة", "💊", "#DC2626"),
+                Triple("عناية شخصية", "✨", "#DB2777"),
+                Triple("إيجار", "🏠", "#475569"),
+                Triple("تعليم", "🎓", "#1D4ED8"),
+                Triple("بنزين", "⛽", "#B45309"),
+                Triple("أقساط", "💳", "#9333EA"),
+                Triple("جمعيات", "🤝", "#059669"),
+                Triple("أولاد", "🧸", "#EA580C"),
+                Triple("أخرى", "📦", "#64748B")
+            )
+            val existingNames = existingCategories.map { it.nameAr }.toSet()
+            for ((name, emoji, hex) in requiredExpenseCategories) {
+                if (name !in existingNames) {
+                    dao.insertCategory(
+                        CategoryEntity(
+                            nameAr = name,
+                            type = CategoryType.EXPENSE,
+                            iconName = emoji,
+                            colorHex = hex,
+                            isDefault = true
+                        )
+                    )
+                }
+            }
+            val incomeDefaults = listOf(
+                Triple("الراتب الشهري", "💰", "#1E7E55"),
+                Triple("عمل حر ومكافآت", "🏆", "#C89D42"),
+                Triple("عوائد واستثمارات", "📈", "#0F766E")
+            )
+            for ((name, emoji, hex) in incomeDefaults) {
+                if (name !in existingNames) {
+                    dao.insertCategory(
+                        CategoryEntity(
+                            nameAr = name,
+                            type = CategoryType.INCOME,
+                            iconName = emoji,
+                            colorHex = hex,
+                            isDefault = true
+                        )
+                    )
+                }
             }
 
             if (dao.getAllAccounts().isEmpty()) {
                 val banks = dao.getAllBanks()
+                val alinma = banks.firstOrNull { it.code == "ALINMA" }
                 val rajhi = banks.firstOrNull { it.code == "ALRAJHI" }
+
                 dao.insertAccount(
                     AccountEntity(
-                        name = "حساب الراجحي الجاري",
+                        name = "حساب الإنماء",
+                        type = AccountType.BANK,
+                        bankId = alinma?.id,
+                        bankName = alinma?.nameAr ?: "مصرف الإنماء",
+                        currency = "SAR",
+                        openingBalanceMinor = 0L,
+                        currentBalanceMinor = 0L,
+                        accountLast4 = "2000",
+                        cardLast4 = "5650",
+                        smsParsingEnabled = true
+                    )
+                )
+                dao.insertAccount(
+                    AccountEntity(
+                        name = "حساب الراجحي",
                         type = AccountType.BANK,
                         bankId = rajhi?.id,
                         bankName = rajhi?.nameAr ?: "مصرف الراجحي",
                         currency = "SAR",
                         openingBalanceMinor = 0L,
                         currentBalanceMinor = 0L,
+                        accountLast4 = "4821",
+                        cardLast4 = "4821",
                         smsParsingEnabled = true
                     )
                 )
                 dao.insertAccount(
                     AccountEntity(
-                        name = "المحفظة النقدية (كاش)",
+                        name = "المحفظة النقدية",
                         type = AccountType.CASH,
                         bankId = null,
                         bankName = "نقدي",
                         currency = "SAR",
                         openingBalanceMinor = 0L,
                         currentBalanceMinor = 0L,
+                        accountLast4 = "",
+                        cardLast4 = "",
                         smsParsingEnabled = false
                     )
                 )
             }
 
-            // إضافة ميزانية افتراضية للشهر الحالي إذا لم تكن موجودة
             val currentYm = MoneyUtils.currentYearMonth()
             dao.upsertBudget(
                 BudgetEntity(
@@ -224,7 +279,7 @@ abstract class SaidiQershDatabase : RoomDatabase() {
                     categoryKey = "TOTAL",
                     categoryId = null,
                     categoryName = "الميزانية الشهرية الإجمالية",
-                    limitMinor = 8000_00L, // 8,000 ر.س افتراضية قابلة للتعديل
+                    limitMinor = 8000_00L,
                     currency = "SAR",
                     alertAt80 = true,
                     alertAt100 = true

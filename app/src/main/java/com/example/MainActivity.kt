@@ -26,6 +26,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.data.local.SaidiQershDatabase
 import com.example.data.local.TransactionEntity
+import com.example.data.local.TransactionSource
 import com.example.data.local.TransactionType
 import com.example.data.repository.SaidiQershRepository
 import com.example.ui.SaidiQershViewModel
@@ -97,12 +98,19 @@ fun SaidiQershAppRoot(
     val isDarkModePreferred by viewModel.isDarkModePreferred.collectAsStateWithLifecycle()
 
     var currentTab by remember { mutableStateOf(MainDestination.DASHBOARD) }
+    var showSmartActionSheet by remember { mutableStateOf(false) }
     var showTransactionDialog by remember { mutableStateOf(false) }
     var dialogInitialTxType by remember { mutableStateOf(TransactionType.EXPENSE) }
     var editingTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
-    var showVoiceDialog by remember { mutableStateOf(false) }
+    var prefillAmountText by remember { mutableStateOf("") }
+    var prefillDescription by remember { mutableStateOf("") }
+    var prefillCategoryId by remember { mutableStateOf<Long?>(null) }
+    var prefillAccountId by remember { mutableStateOf<Long?>(null) }
 
-    // الرجوع إلى الشاشة الرئيسية عند الضغط على زر الرجوع من أي تبويب فرعي
+    var showVoiceDialog by remember { mutableStateOf(false) }
+    var showScanReceiptDialog by remember { mutableStateOf(false) }
+    var showPasteBankSmsDialog by remember { mutableStateOf(false) }
+
     BackHandler(enabled = currentTab != MainDestination.DASHBOARD) {
         currentTab = MainDestination.DASHBOARD
     }
@@ -143,6 +151,27 @@ fun SaidiQershAppRoot(
                         }
                     },
                     actions = {
+                        // تبديل سريع للمظهر (فاتح -> غامق -> زي الموبايل)
+                        IconButton(
+                            onClick = {
+                                val nextMode = when (isDarkModePreferred) {
+                                    null -> true
+                                    true -> false
+                                    false -> null
+                                }
+                                viewModel.toggleDarkMode(nextMode)
+                            },
+                            modifier = Modifier.testTag("top_theme_toggle_btn")
+                        ) {
+                            Icon(
+                                imageVector = when (isDarkModePreferred) {
+                                    true -> Icons.Default.DarkMode
+                                    false -> Icons.Default.LightMode
+                                    null -> Icons.Default.BrightnessAuto
+                                },
+                                contentDescription = "تغيير المظهر"
+                            )
+                        }
                         IconButton(
                             onClick = { showVoiceDialog = true },
                             modifier = Modifier.testTag("top_voice_btn")
@@ -202,16 +231,12 @@ fun SaidiQershAppRoot(
             },
             floatingActionButton = {
                 FloatingActionButton(
-                    onClick = {
-                        editingTransaction = null
-                        dialogInitialTxType = TransactionType.EXPENSE
-                        showTransactionDialog = true
-                    },
+                    onClick = { showSmartActionSheet = true },
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
                     modifier = Modifier.testTag("main_fab_add_tx")
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "إضافة عملية مالية")
+                    Icon(Icons.Default.Add, contentDescription = "تسجّل إزاي؟")
                 }
             }
         ) { innerPadding ->
@@ -278,6 +303,10 @@ fun SaidiQershAppRoot(
                                 categories = categories,
                                 onQuickAddClick = { txType ->
                                     editingTransaction = null
+                                    prefillAmountText = ""
+                                    prefillDescription = ""
+                                    prefillCategoryId = null
+                                    prefillAccountId = null
                                     dialogInitialTxType = txType
                                     showTransactionDialog = true
                                 },
@@ -301,6 +330,10 @@ fun SaidiQershAppRoot(
                                 onClearFilters = { viewModel.clearFilters() },
                                 onAddTransactionClick = { txType ->
                                     editingTransaction = null
+                                    prefillAmountText = ""
+                                    prefillDescription = ""
+                                    prefillCategoryId = null
+                                    prefillAccountId = null
                                     dialogInitialTxType = txType
                                     showTransactionDialog = true
                                 },
@@ -347,8 +380,8 @@ fun SaidiQershAppRoot(
                             AccountsManagementScreen(
                                 accounts = accounts,
                                 banks = banks,
-                                onAddOrUpdateAccount = { id, name, type, bId, cur, openBal, smsEn ->
-                                    viewModel.addOrUpdateAccount(id, name, type, bId, cur, openBal, smsEn)
+                                onAddOrUpdateAccount = { id, name, type, bId, cur, openBal, smsEn, acc4, card4 ->
+                                    viewModel.addOrUpdateAccount(id, name, type, bId, cur, openBal, smsEn, acc4, card4)
                                 },
                                 onReconcileAccount = { accId, newBal, reason ->
                                     viewModel.reconcileAccount(accId, newBal, reason)
@@ -418,17 +451,40 @@ fun SaidiQershAppRoot(
         }
     }
 
+    if (showSmartActionSheet) {
+        SmartActionBottomSheet(
+            onDismiss = { showSmartActionSheet = false },
+            onSelectVoice = { showVoiceDialog = true },
+            onSelectScanReceipt = { showScanReceiptDialog = true },
+            onSelectPasteBankSms = { showPasteBankSmsDialog = true },
+            onSelectManualTransaction = {
+                editingTransaction = null
+                prefillAmountText = ""
+                prefillDescription = ""
+                prefillCategoryId = null
+                prefillAccountId = null
+                dialogInitialTxType = TransactionType.EXPENSE
+                showTransactionDialog = true
+            }
+        )
+    }
+
     if (showTransactionDialog) {
         TransactionFormDialog(
             initialType = dialogInitialTxType,
             editingTransaction = editingTransaction,
+            initialAmountText = prefillAmountText,
+            initialDescription = prefillDescription,
+            initialCategoryId = prefillCategoryId,
+            initialAccountId = prefillAccountId,
             accounts = accounts,
             categories = categories,
+            obligations = obligations,
             onDismiss = {
                 showTransactionDialog = false
                 editingTransaction = null
             },
-            onSave = { id, type, amt, cur, desc, notes, accId, toAccId, catId, merch ->
+            onSave = { id, type, amt, cur, desc, notes, accId, toAccId, catId, merch, isMonthlyObl, oblId ->
                 viewModel.saveTransaction(
                     existingId = id,
                     type = type,
@@ -439,7 +495,53 @@ fun SaidiQershAppRoot(
                     accountId = accId,
                     toAccountId = toAccId,
                     categoryId = catId,
-                    merchantName = merch
+                    merchantName = merch,
+                    isMonthlyObligation = isMonthlyObl,
+                    linkedObligationId = oblId
+                )
+            }
+        )
+    }
+
+    if (showScanReceiptDialog) {
+        ScanReceiptDialog(
+            categories = categories,
+            onDismiss = { showScanReceiptDialog = false },
+            onReceiptExtracted = { amtText, merchant, catId ->
+                showScanReceiptDialog = false
+                editingTransaction = null
+                prefillAmountText = amtText
+                prefillDescription = merchant
+                prefillCategoryId = catId
+                prefillAccountId = accounts.firstOrNull()?.id
+                dialogInitialTxType = TransactionType.EXPENSE
+                showTransactionDialog = true
+            }
+        )
+    }
+
+    if (showPasteBankSmsDialog) {
+        PasteBankSmsModalDialog(
+            accounts = accounts,
+            banks = banks,
+            categories = categories,
+            onDismiss = { showPasteBankSmsDialog = false },
+            onAddToReviewQueue = { sender, body ->
+                viewModel.ingestSmsMessage(sender, body, isTestSandbox = false)
+                currentTab = MainDestination.SMS_REVIEW
+            },
+            onConfirmDirectly = { amtText, cur, merchant, accId, catId ->
+                viewModel.saveTransaction(
+                    existingId = 0L,
+                    type = TransactionType.EXPENSE,
+                    amountText = amtText,
+                    currency = cur,
+                    description = merchant,
+                    notes = "أضيفت من لصق رسالة بنكية",
+                    accountId = accId,
+                    categoryId = catId,
+                    merchantName = merchant,
+                    source = TransactionSource.SMS_CONFIRMED
                 )
             }
         )

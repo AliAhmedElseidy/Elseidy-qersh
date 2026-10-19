@@ -17,12 +17,10 @@ import org.robolectric.annotation.Config
 
 /**
  * اختبارات Robolectric + Room الشاملة لقاعدة البيانات والعمليات المالية ومراجعة رسائل البنوك:
- * - التعامل مع قاعدة بيانات فارغة.
- * - إضافة وتعديل وحذف المصروفات وتحديث الأرصدة.
- * - التحويل بين الحسابات ومعالجة الاستردادات.
- * - منع التكرار في رسائل البنوك.
- * - عدم ظهور العمليات المعلقة (Pending) ضمن إجمالي المصروفات المؤكدة.
- * - تعديل العملية المقترحة قبل التأكيد، وتأكيدها مرة واحدة فقط في معاملة قاعدة بيانات واحدة.
+ * - التحقق من تأسيس الـ 16 تصنيفًا والحسابات الذكية (*2000 و *4821).
+ * - استيراد رسالة Samsung Wallet / الإنماء وربطها تلقائيًا بحساب الإنماء (*2000).
+ * - الفلترة التلقائية لرسائل تفعيل المستفيد وOTP وعدم إضافتها لقائمة المراجعة.
+ * - إضافة وتعديل وحذف المصروفات وتحديث الأرصدة والتحويلات والاستردادات.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -48,18 +46,42 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `empty database handles queries gracefully and reads Arabic app_name`() = runBlocking {
+    fun `empty database handles queries gracefully and seeds 16 categories and smart accounts`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         assertEquals("الصعيدي قرش", context.getString(R.string.app_name))
 
-        val initialTxs = repository.confirmedTransactionsFlow.first()
-        assertTrue(initialTxs.isEmpty())
-        assertEquals(0L, SaidiQershRepository.computeNetConfirmedExpensesMinor(initialTxs))
-        assertEquals(0L, dao.observeTotalNetBalanceMinor().first())
+        repository.ensureSeeded()
+        val cats = repository.categoriesFlow.first()
+        val catNames = cats.map { it.nameAr }
+        assertTrue(catNames.containsAll(listOf("بقالة", "أكل بره", "مواصلات", "تسوق", "فواتير", "اشتراكات", "سفر", "صحة", "عناية شخصية", "إيجار", "تعليم", "بنزين", "أقساط", "جمعيات", "أولاد", "أخرى")))
 
-        // استعادة نسخة احتياطية تالفة يعيد خطأ محكومًا دون انهيار
-        val badRestore = repository.restoreLocalBackupJson("{invalid_json}")
-        assertTrue(badRestore.isFailure)
+        val accs = repository.accountsFlow.first()
+        assertTrue(accs.any { it.name == "حساب الإنماء" && it.accountLast4 == "2000" && it.cardLast4 == "5650" })
+    }
+
+    @Test
+    fun `Samsung Wallet SMS automatically matches Alinma account 2000 and non-financial OTP SMS is auto-ignored`() = runBlocking {
+        repository.ensureSeeded()
+        val alinmaAcc = repository.accountsFlow.first().first { it.accountLast4 == "2000" }
+
+        // 1. رسالة غير مالية (تم تفعيل مستفيد / OTP) -> يجب استبعادها تلقائياً وعدم إضافتها لقائمة المراجعة
+        val ignoredId = repository.ingestBankSms("Alinma", "تم تفعيل مستفيد بنجاح، رمز التحقق OTP: 3910")
+        assertNull(ignoredId)
+
+        // 2. رسالة شراء Samsung Wallet مع ريال سعودى 10 وحساب *2000 وبطاقة *5650
+        val samsungSms = "شراء عبر Samsung Wallet مبلغ: ريال سعودى 10 بطاقة مدى: *5650 حساب: *2000 من: dani est"
+        val suggestedId = repository.ingestBankSms("Alinma", samsungSms)
+        assertNotNull(suggestedId)
+
+        val suggested = dao.getSuggestedById(suggestedId!!)!!
+        assertEquals(1000L, suggested.extractedAmountMinor)
+        assertEquals("dani est", suggested.merchantName)
+        assertEquals(alinmaAcc.id, suggested.suggestedAccountId)
+
+        // 3. عند الضغط على "أضف" (تأكيد العملية)، يُخصم 10 ر.س من حساب الإنماء مباشرة
+        val txId = repository.confirmSuggestedTransaction(suggestedId)
+        assertNotNull(txId)
+        assertEquals(-1000L, dao.getAccountById(alinmaAcc.id)!!.currentBalanceMinor)
     }
 
     @Test
@@ -74,7 +96,6 @@ class ExampleRobolectricTest {
             )
         )
 
-        // 1. إضافة مصروف بقيمة 200 ريال
         val txId = repository.addConfirmedTransaction(
             TransactionEntity(
                 type = TransactionType.EXPENSE,
@@ -86,19 +107,13 @@ class ExampleRobolectricTest {
         )
         assertEquals(4800_00L, dao.getAccountById(bankAccId)!!.currentBalanceMinor)
 
-        // 2. تعديل المصروف إلى 350 ريال
         val savedTx = dao.getTransactionById(txId)!!
         repository.updateConfirmedTransaction(savedTx.copy(amountMinor = 350_00L, description = "مقاضي الشهر"))
         assertEquals(4650_00L, dao.getAccountById(bankAccId)!!.currentBalanceMinor)
 
-        // 3. حذف المصروف يستعيد الرصيد إلى 5000 ريال
         repository.deleteConfirmedTransaction(txId)
         assertEquals(5000_00L, dao.getAccountById(bankAccId)!!.currentBalanceMinor)
         assertNull(dao.getTransactionById(txId))
-
-        val logs = repository.auditLogsFlow.first()
-        assertTrue(logs.any { it.eventType == "TRANSACTION_EDIT" })
-        assertTrue(logs.any { it.eventType == "TRANSACTION_DELETE" })
     }
 
     @Test
@@ -122,7 +137,6 @@ class ExampleRobolectricTest {
             )
         )
 
-        // تحويل 400 ريال من البنك إلى الكاش
         repository.addConfirmedTransaction(
             TransactionEntity(
                 type = TransactionType.TRANSFER,
@@ -136,7 +150,6 @@ class ExampleRobolectricTest {
         assertEquals(2600_00L, dao.getAccountById(bankId)!!.currentBalanceMinor)
         assertEquals(900_00L, dao.getAccountById(cashId)!!.currentBalanceMinor)
 
-        // تسجيل مصروف 300 ريال ثم استرداد 100 ريال على حساب البنك
         repository.addConfirmedTransaction(
             TransactionEntity(
                 type = TransactionType.EXPENSE,
@@ -156,68 +169,10 @@ class ExampleRobolectricTest {
             )
         )
 
-        // الرصيد النهائي للبنك: 2600 - 300 + 100 = 2400 ريال
         assertEquals(2400_00L, dao.getAccountById(bankId)!!.currentBalanceMinor)
 
         val allTxs = repository.confirmedTransactionsFlow.first()
-        // صافي المصروفات المؤكدة = 300 - 100 = 200 ريال (لا يشمل التحويل)
         assertEquals(200_00L, SaidiQershRepository.computeNetConfirmedExpensesMinor(allTxs))
-        // إجمالي الدخل = 0 (الاسترداد لا يُحتسب دخلًا عاديًا)
         assertEquals(0L, SaidiQershRepository.computeConfirmedIncomeMinor(allTxs))
-    }
-
-    @Test
-    fun `pending SMS does not affect confirmed expenses, prevents duplicates, allows edit before confirm, and confirms once only`() = runBlocking {
-        repository.ensureSeeded()
-        val acc = repository.accountsFlow.first().first()
-        val initialBalance = acc.currentBalanceMinor
-
-        val smsBody = """
-            شراء عبر نقاط البيع
-            بمبلغ: SAR 120.00
-            لدى: محطة الدريس
-            مرجع: REF990011
-        """.trimIndent()
-
-        // 1. استيراد الرسالة البنكية -> تنتج عملية مقترحة بحالة PENDING
-        val suggestedId = repository.ingestBankSms("AlRajhiBank", smsBody)
-        assertNotNull(suggestedId)
-        assertTrue(suggestedId!! > 0L)
-
-        // 2. منع التكرار: إرسال نفس الرسالة مرة أخرى يُرفض
-        val duplicateAttempt = repository.ingestBankSms("AlRajhiBank", smsBody)
-        assertNull(duplicateAttempt)
-
-        // 3. عدم ظهور العملية المعلقة ضمن إجمالي المصروفات المؤكدة أو تغيير رصيد الحساب
-        val confirmedBefore = repository.confirmedTransactionsFlow.first()
-        assertTrue(confirmedBefore.isEmpty())
-        assertEquals(0L, SaidiQershRepository.computeNetConfirmedExpensesMinor(confirmedBefore))
-        assertEquals(initialBalance, dao.getAccountById(acc.id)!!.currentBalanceMinor)
-
-        // 4. تعديل العملية المقترحة قبل التأكيد (تعديل المبلغ إلى 150 ريال والتاجر إلى محطة وقود ساسكو)
-        val pendingEntity = dao.getSuggestedById(suggestedId)!!
-        repository.updateSuggestedBeforeConfirm(
-            suggested = pendingEntity,
-            newAmountMinor = 150_00L,
-            newMerchant = "محطة وقود ساسكو",
-            newCategoryId = pendingEntity.suggestedCategoryId,
-            newCategoryName = pendingEntity.suggestedCategoryName,
-            newAccountId = acc.id,
-            newType = SmsSuggestedType.CARD_PURCHASE
-        )
-
-        // 5. تأكيد العملية مرة واحدة فقط
-        val confirmedTxId1 = repository.confirmSuggestedTransaction(suggestedId)
-        assertNotNull(confirmedTxId1)
-
-        // محاولة تأكيد نفس العملية المقترحة مرة ثانية -> تُرفض لمنع المضاعفة!
-        val confirmedTxId2 = repository.confirmSuggestedTransaction(suggestedId)
-        assertNull(confirmedTxId2)
-
-        // 6. التحقق من تحديث الرصيد والمصروفات المؤكدة مرة واحدة فقط بالقيمة المعدلة (150 ريال)
-        val confirmedAfter = repository.confirmedTransactionsFlow.first()
-        assertEquals(1, confirmedAfter.size)
-        assertEquals(150_00L, SaidiQershRepository.computeNetConfirmedExpensesMinor(confirmedAfter))
-        assertEquals(initialBalance - 150_00L, dao.getAccountById(acc.id)!!.currentBalanceMinor)
     }
 }

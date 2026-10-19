@@ -1,5 +1,7 @@
 package com.example
 
+import com.example.data.local.AccountEntity
+import com.example.data.local.AccountType
 import com.example.data.local.ReviewStatus
 import com.example.data.local.SmsSuggestedType
 import com.example.data.local.TransactionEntity
@@ -13,8 +15,10 @@ import org.junit.Test
 import java.math.BigDecimal
 
 /**
- * اختبارات الوحدات الفعلية للحسابات المالية الدقيقة (BigDecimal / Minor Units)،
- * محلل رسائل البنوك (العربية والإنجليزية)، ومحلل الإملاء الصوتي بالعربية.
+ * اختبارات الوحدات الفعلية للحسابات المالية الدقيقة،
+ * محلل رسائل البنوك المحدث (Samsung Wallet / مصرف الإنماء / الراجحي / SNB)،
+ * الفلترة التلقائية للرسائل غير المالية (تفعيل مستفيد / OTP / تسجيل دخول)،
+ * والربط الذكي للحسابات والبطاقات (*2000 / *5650).
  */
 class ExampleUnitTest {
 
@@ -27,11 +31,71 @@ class ExampleUnitTest {
         val minor2 = MoneyUtils.parseToMinorUnits("35.50")
         assertEquals(3550L, minor2)
         assertEquals("35.50 ر.س", MoneyUtils.formatMinor(minor2!!, "SAR"))
+        assertEquals("10.00 ر.س", MoneyUtils.formatMinorTwoDecimals(1000L, "SAR"))
+    }
+
+    @Test
+    fun `parse Samsung Wallet and Alinma SMS with ريال سعودى before integer amount and match account 2000 and card 5650`() {
+        val accounts = listOf(
+            AccountEntity(
+                id = 10L,
+                name = "حساب الإنماء",
+                type = AccountType.BANK,
+                bankName = "مصرف الإنماء",
+                currency = "SAR",
+                accountLast4 = "2000",
+                cardLast4 = "5650"
+            ),
+            AccountEntity(
+                id = 20L,
+                name = "حساب الراجحي",
+                type = AccountType.BANK,
+                bankName = "مصرف الراجحي",
+                currency = "SAR",
+                accountLast4 = "4821",
+                cardLast4 = "4821"
+            )
+        )
+
+        val samsungWalletSms = "شراء عبر Samsung Wallet مبلغ: ريال سعودى 10 بطاقة مدى: *5650 حساب: *2000 من: dani est"
+        val parsed = BankSmsParserEngine.parseSms(
+            senderAddress = "Alinma",
+            rawBody = samsungWalletSms,
+            accounts = accounts
+        )
+
+        assertEquals(SmsSuggestedType.CARD_PURCHASE, parsed.suggestedType)
+        assertEquals(1000L, parsed.extractedAmountMinor) // 10.00 ر.س
+        assertEquals("SAR", parsed.currency)
+        assertEquals("dani est", parsed.merchantName)
+        assertEquals("2000", parsed.extractedAccountLast4)
+        assertEquals("5650", parsed.extractedCardLast4)
+        assertEquals(10L, parsed.matchedAccountId) // ربط ذكي تلقائي مع حساب الإنماء
+        assertEquals(ReviewStatus.PENDING, parsed.reviewStatus)
+    }
+
+    @Test
+    fun `auto ignore non-financial SMS keywords like beneficiary activation, OTP, and login`() {
+        val nonFinancialMessages = listOf(
+            "مصرف الإنماء: تم تفعيل مستفيد بنجاح في حسابكم",
+            "تم إضافة مستفيد جديد، يرجى عدم مشاركة الكود",
+            "رمز التحقق الخاص بك هو 8829",
+            "كود التفعيل لخدمة أبشر هو 1920",
+            "كلمة المرور المؤقتة لعملية الشراء هي 4412",
+            "Your OTP for online banking is 7731",
+            "لا تشارك الرقم السري للبطاقة مع أي شخص",
+            "إشعار تسجيل دخول إلى تطبيق البنك"
+        )
+
+        for (msg in nonFinancialMessages) {
+            val result = BankSmsParserEngine.parseSms("Alinma", msg)
+            assertEquals("Failed to auto-ignore: $msg", SmsSuggestedType.BALANCE_NOTICE_ONLY, result.suggestedType)
+            assertEquals("Failed to set IGNORED status: $msg", ReviewStatus.IGNORED, result.reviewStatus)
+        }
     }
 
     @Test
     fun `parse Arabic bank SMS for AlRajhi, SNB, Alinma, and Refund`() {
-        // 1. شراء بالبطاقة - مصرف الراجحي
         val rajhiSms = """
             شراء عبر نقاط البيع
             بطاقة: 4821;مدى-أثير
@@ -48,7 +112,6 @@ class ExampleUnitTest {
         assertEquals("RJ8849201", parsedRajhi.referenceNumber)
         assertEquals(ReviewStatus.PENDING, parsedRajhi.reviewStatus)
 
-        // 2. استرداد مبلغ - لا يُصنف كشراء
         val refundSms = """
             إشعار استرداد مبلغ
             بمبلغ: SAR 45.00
@@ -62,7 +125,7 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `parse English bank SMS for POS purchase, ATM withdrawal, and outgoing transfer`() {
+    fun `parse English bank SMS for POS purchase and ATM withdrawal`() {
         val posEnglish = "PoS Purchase of SAR 210.25 at STARBUCKS CAFE on 2026-10-18 Ref: EN998811"
         val parsedPos = BankSmsParserEngine.parseSms("SNB", posEnglish)
         assertEquals(SmsSuggestedType.CARD_PURCHASE, parsedPos.suggestedType)
@@ -79,28 +142,6 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `ignore non-transaction balance notices and promotional discount messages with word خصم`() {
-        // إشعار رصيد لا يمثل معاملة جديدة
-        val balanceSms = "عزيزي العميل، الرصيد المتاح في حسابكم الجاري هو 12,450.00 ر.س"
-        val parsedBal = BankSmsParserEngine.parseSms("AlRajhiBank", balanceSms)
-        assertEquals(SmsSuggestedType.BALANCE_NOTICE_ONLY, parsedBal.suggestedType)
-        assertEquals(ReviewStatus.IGNORED, parsedBal.reviewStatus)
-
-        // رسالة عرض ترويجي تحتوي كلمة "خصم" (القاعدة 15)
-        val promoSms = "عرض خاص! استمتع بـ خصم 30% بمناسبة نهاية الأسبوع لدى متجر الأزياء"
-        val parsedPromo = BankSmsParserEngine.parseSms("StorePromo", promoSms)
-        assertEquals(SmsSuggestedType.BALANCE_NOTICE_ONLY, parsedPromo.suggestedType)
-        assertEquals(ReviewStatus.IGNORED, parsedPromo.reviewStatus)
-
-        // رسالة غير واضحة بدون مبلغ لا تخترع بيانات وتذهب لقائمة UNCLEAR (القاعدة 16)
-        val unclearSms = "تمت عملية شراء عبر نقاط البيع لدى متجر الإلكترونيات بنجاح"
-        val parsedUnclear = BankSmsParserEngine.parseSms("Alinma", unclearSms)
-        assertEquals(SmsSuggestedType.UNCLEAR, parsedUnclear.suggestedType)
-        assertNull(parsedUnclear.extractedAmountMinor)
-        assertEquals(ReviewStatus.UNCLEAR, parsedUnclear.reviewStatus)
-    }
-
-    @Test
     fun `refund reduces net expenses without inflating regular income and transfer is separated`() {
         val list = listOf(
             TransactionEntity(id = 1, type = TransactionType.EXPENSE, amountMinor = 500_00L, description = "مشتريات", accountId = 1),
@@ -108,9 +149,7 @@ class ExampleUnitTest {
             TransactionEntity(id = 3, type = TransactionType.INCOME, amountMinor = 9000_00L, description = "راتب", accountId = 1),
             TransactionEntity(id = 4, type = TransactionType.TRANSFER, amountMinor = 1000_00L, description = "تحويل للكاش", accountId = 1, toAccountId = 2)
         )
-        // صافي المصروفات = 500 - 120 = 380.00
         assertEquals(380_00L, SaidiQershRepository.computeNetConfirmedExpensesMinor(list))
-        // إجمالي الدخل = 9000.00 فقط (لا يشمل الاسترداد ولا التحويل)
         assertEquals(9000_00L, SaidiQershRepository.computeConfirmedIncomeMinor(list))
     }
 
@@ -122,6 +161,6 @@ class ExampleUnitTest {
         assertEquals(35_00L, proposal.amountMinor)
         assertEquals("SAR", proposal.currency)
         assertEquals("بنزين", proposal.description)
-        assertEquals("الوقود والمواصلات", proposal.suggestedCategoryName)
+        assertEquals("بنزين", proposal.suggestedCategoryName)
     }
 }

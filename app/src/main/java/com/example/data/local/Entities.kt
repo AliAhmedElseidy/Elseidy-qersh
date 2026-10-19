@@ -23,8 +23,8 @@ enum class CategoryType(val titleAr: String) {
 enum class TransactionType(val titleAr: String) {
     EXPENSE("مصروف"),
     INCOME("دخل"),
-    TRANSFER("تحويل بين الحسابات"),
     REFUND("استرداد مالي"),
+    TRANSFER("تحويل بين الحسابات"),
     CREDIT_CARD_PAYMENT("سداد بطاقة ائتمان"),
     OBLIGATION_PAYMENT("سداد التزام/قسط")
 }
@@ -33,6 +33,7 @@ enum class TransactionSource(val titleAr: String) {
     MANUAL("إدخال يدوي"),
     SMS_CONFIRMED("رسالة بنكية مؤكدة"),
     VOICE("إملاء صوتي"),
+    RECEIPT_SCAN("تصوير إيصال"),
     SHOPPING_LIST("قائمة مشتريات البيت"),
     OBLIGATION("التزام/قسط"),
     RECONCILIATION("تسوية رصيد")
@@ -47,7 +48,7 @@ enum class SmsSuggestedType(val titleAr: String, val isFinancialTransaction: Boo
     REFUND("استرداد مبلغ", true),
     CREDIT_CARD_SETTLEMENT("سداد بطاقة ائتمان", true),
     BILL_PAYMENT("دفع فاتورة", true),
-    BALANCE_NOTICE_ONLY("إشعار رصيد (لا يمثل معاملة)", false),
+    BALANCE_NOTICE_ONLY("إشعار غير مالي / رصيد فقط", false),
     UNCLEAR("رسالة غير واضحة تحتاج تدقيق", false)
 }
 
@@ -109,7 +110,7 @@ data class SmsRuleEntity(
 )
 
 /**
- * 3. كيان الحسابات المالية (نقدي، بنكي، بطاقة ائتمان، محفظة إلكترونية)
+ * 3. كيان الحسابات المالية مع دعم مطابقة آخر 4 أرقام من الحساب أو البطاقة تلقائيًا
  */
 @Entity(
     tableName = "accounts",
@@ -125,6 +126,8 @@ data class AccountEntity(
     val openingBalanceMinor: Long = 0L,
     val currentBalanceMinor: Long = 0L,
     val creditLimitMinor: Long = 0L,
+    val accountLast4: String = "",
+    val cardLast4: String = "",
     val smsParsingEnabled: Boolean = true,
     val createdAt: Long = System.currentTimeMillis()
 ) {
@@ -133,7 +136,7 @@ data class AccountEntity(
 }
 
 /**
- * 4. كيان التصنيفات القابلة للتعديل
+ * 4. كيان التصنيفات القابلة للتعديل مع أيقونة تعبيرية ملونة لشبكة التصنيفات (4 أعمدة)
  */
 @Entity(
     tableName = "categories",
@@ -143,14 +146,14 @@ data class CategoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val nameAr: String,
     val type: CategoryType,
-    val iconName: String = "category",
+    val iconName: String = "🛒",
     val colorHex: String = "#0D4732",
     val isDefault: Boolean = false,
     val isArchived: Boolean = false
 )
 
 /**
- * 5. كيان العمليات المالية المؤكدة فقط (لا تدخل العمليات المقترحة هنا إلا بعد تأكيد المستخدم)
+ * 5. كيان العمليات المالية المؤكدة فقط
  */
 @Entity(
     tableName = "transactions",
@@ -180,6 +183,7 @@ data class TransactionEntity(
     val source: TransactionSource = TransactionSource.MANUAL,
     val relatedTransactionId: Long? = null,
     val obligationId: Long? = null,
+    val isMonthlyObligationPayment: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 ) {
@@ -188,7 +192,7 @@ data class TransactionEntity(
 }
 
 /**
- * 6. كيان العمليات المقترحة المستخرجة من رسائل SMS البنكية (أو الإملاء الصوتي قبل التأكيد)
+ * 6. كيان العمليات المقترحة المستخرجة من رسائل SMS البنكية
  */
 @Entity(
     tableName = "suggested_transactions",
@@ -211,8 +215,10 @@ data class SuggestedTransactionEntity(
     val merchantName: String = "",
     val suggestedType: SmsSuggestedType,
     val suggestedCategoryId: Long? = null,
-    val suggestedCategoryName: String = "غير مصنف",
+    val suggestedCategoryName: String = "أخرى",
     val suggestedAccountId: Long? = null,
+    val extractedAccountLast4: String = "",
+    val extractedCardLast4: String = "",
     val status: ReviewStatus = ReviewStatus.PENDING,
     val confirmedTransactionId: Long? = null,
     val isTestSandbox: Boolean = false,
@@ -222,7 +228,7 @@ data class SuggestedTransactionEntity(
 )
 
 /**
- * 7. كيان الميزانيات الشهرية (إجمالية عندما يكون categoryKey = "TOTAL"، أو مخصصة لتصنيف معين)
+ * 7. كيان الميزانيات الشهرية
  */
 @Entity(
     tableName = "budgets",
@@ -231,7 +237,7 @@ data class SuggestedTransactionEntity(
 data class BudgetEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val yearMonth: String,
-    val categoryKey: String = "TOTAL", // "TOTAL" أو معرف التصنيف كنص
+    val categoryKey: String = "TOTAL",
     val categoryId: Long? = null,
     val categoryName: String = "الميزانية الشهرية الإجمالية",
     val limitMinor: Long,
@@ -258,8 +264,8 @@ data class ObligationEntity(
     val dueDateMillis: Long,
     val isRecurring: Boolean = false,
     val recurrenceMonths: Int = 1,
-    val roscaPayoutMonth: String = "", // موعد القبض في حالة الجمعية
-    val roscaRole: String = "", // ترتيب الدور
+    val roscaPayoutMonth: String = "",
+    val roscaRole: String = "",
     val accountId: Long? = null,
     val categoryId: Long? = null,
     val reminderEnabled: Boolean = true,
@@ -271,7 +277,7 @@ data class ObligationEntity(
 }
 
 /**
- * 9. كيان دفعات الأقساط والالتزامات الجزئية (مع قيد فريد لمنع تكرار تسجيل الدفعة نفسها)
+ * 9. كيان دفعات الأقساط والالتزامات الجزئية
  */
 @Entity(
     tableName = "installment_payments",
@@ -283,7 +289,7 @@ data class ObligationEntity(
 data class InstallmentPaymentEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val obligationId: Long,
-    val paymentKey: String, // مفتاح فريد للدفعة لمنع التكرار (مثل "2026-10-1" أو رقم مرجع)
+    val paymentKey: String,
     val amountMinor: Long,
     val paidAt: Long = System.currentTimeMillis(),
     val linkedTransactionId: Long? = null,
@@ -307,9 +313,6 @@ data class SavingsGoalEntity(
     val createdAt: Long = System.currentTimeMillis()
 )
 
-/**
- * حركات الإيداع والسحب داخل صناديق التوفير
- */
 @Entity(
     tableName = "savings_movements",
     indices = [Index(value = ["goalId"])]
