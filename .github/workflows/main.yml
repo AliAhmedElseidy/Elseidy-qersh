@@ -1,0 +1,97 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Auto-Fix & Build Debug APK
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "GEMINI_API_KEY=AIzaSyDummyKeyForBuild" >> local.properties
+          echo "API_KEY=AIzaSyDummyKeyForBuild" >> local.properties
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          if [ -d "app" ]; then
+            PKG="com.aistudio.hagagstudy.kpmw"
+            cat <<EOF > app/google-services.json
+          {
+            "project_info": {
+              "project_number": "123456789000",
+              "project_id": "hagag-debug-project",
+              "storage_bucket": "hagag-debug-project.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:123456789000:android:1234567890abcdef",
+                  "android_client_info": { "package_name": "$PKG" }
+                },
+                "api_key": [{ "current_key": "AIzaSyDummyKeyForDebugBuild123456789" }]
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+          fi
+          if [ -d "app/src/main/res" ] && [ -z "$(find app/src/main/res -name 'ic_launcher*' 2>/dev/null)" ]; then
+            mkdir -p app/src/main/res/mipmap-anydpi-v26
+            cat <<EOF > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@android:color/black"/>
+              <foreground android:drawable="@android:drawable/sym_def_app_icon"/>
+          </adaptive-icon>
+          EOF
+            cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+          fi
+          set +e
+          gradle assembleDebug --no-daemon --console=plain > build.log 2>&1
+          EXIT_CODE=$?
+          set -e
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "### ❌ آخر 60 سطر من البناء:" >> $GITHUB_STEP_SUMMARY
+            echo '```text' >> $GITHUB_STEP_SUMMARY
+            tail -n 60 build.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit $EXIT_CODE
+          fi
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hagag-debug-apk
+          path: "**/build/outputs/apk/debug/*.apk"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
