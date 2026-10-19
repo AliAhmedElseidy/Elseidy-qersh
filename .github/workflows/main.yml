@@ -40,7 +40,9 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
           if [ -d "app" ]; then
-            PKG="com.aistudio.hagagstudy.kpmw"
+            PKG=$(grep -rhoE 'applicationId\s*=?\s*"[^"]+"' app/build.gradle* 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+            [ -z "$PKG" ] && PKG="com.aistudio.saidiqersh.sqfint"
+            echo "Using package: $PKG"
             cat <<EOF > app/google-services.json
           {
             "project_info": {
@@ -83,6 +85,7 @@ jobs:
             echo '```' >> $GITHUB_STEP_SUMMARY
             exit $EXIT_CODE
           fi
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
