@@ -40,13 +40,33 @@ abstract class SaidiQershDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: SaidiQershDatabase? = null
 
-        private val MIGRATION_2_3 = object : Migration(2, 3) {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE banks ADD COLUMN autoApproveEnabled INTEGER NOT NULL DEFAULT 0")
+                // إضافة أعمدة مطابقة آخر 4 أرقام للحساب والبطاقة في حال الترقية من الإصدار الأول
+                try {
+                    db.execSQL("ALTER TABLE accounts ADD COLUMN accountLast4 TEXT NOT NULL DEFAULT ''")
+                } catch (_: Exception) {}
+                try {
+                    db.execSQL("ALTER TABLE accounts ADD COLUMN cardLast4 TEXT NOT NULL DEFAULT ''")
+                } catch (_: Exception) {}
+                try {
+                    db.execSQL("ALTER TABLE suggested_transactions ADD COLUMN extractedAccountLast4 TEXT NOT NULL DEFAULT ''")
+                } catch (_: Exception) {}
+                try {
+                    db.execSQL("ALTER TABLE suggested_transactions ADD COLUMN extractedCardLast4 TEXT NOT NULL DEFAULT ''")
+                } catch (_: Exception) {}
             }
         }
 
-        private val MIGRATION_3_4 = object : Migration(3, 4) {
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                try {
+                    db.execSQL("ALTER TABLE banks ADD COLUMN autoApproveEnabled INTEGER NOT NULL DEFAULT 0")
+                } catch (_: Exception) {}
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     """
@@ -87,8 +107,7 @@ abstract class SaidiQershDatabase : RoomDatabase() {
                     SaidiQershDatabase::class.java,
                     "saidi_qersh_local.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
-                    .fallbackToDestructiveMigration(true)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                 INSTANCE = instance
                 instance

@@ -38,7 +38,7 @@
             </intent-filter>
         </activity>
 
-        <!-- مستقبل الرسائل البنكية في الخلفية وأزرار الإشعارات التفاعلية (أضف | تجاهل) -->
+        <!-- مستقبل الرسائل البنكية في الخلفية (محمي بصلاحية النظام BROADCAST_SMS) -->
         <receiver
             android:name=".receivers.BankSmsBroadcastReceiver"
             android:enabled="true"
@@ -47,6 +47,13 @@
             <intent-filter android:priority="999">
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
             </intent-filter>
+        </receiver>
+
+        <!-- مستقبل أزرار الإشعارات التفاعلية الداخلي (أضف | تجاهل) غير مُصدّر للخارج -->
+        <receiver
+            android:name=".receivers.SmsNotificationActionReceiver"
+            android:enabled="true"
+            android:exported="false">
             <intent-filter>
                 <action android:name="com.example.action.APPROVE_SMS_NOTIFICATION" />
                 <action android:name="com.example.action.IGNORE_SMS_NOTIFICATION" />

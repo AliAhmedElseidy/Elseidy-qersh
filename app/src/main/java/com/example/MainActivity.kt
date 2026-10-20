@@ -63,14 +63,17 @@ class MainActivity : ComponentActivity() {
         ObligationReminderWorker.schedulePeriodicReminders(applicationContext)
 
         val openTabExtra = intent?.getStringExtra("open_tab")
-        val initialTab = if (openTabExtra == "SMS_REVIEW") {
-            MainDestination.SMS_REVIEW
-        } else {
-            MainDestination.DASHBOARD
+        val initialTab = when (openTabExtra) {
+            "SMS_REVIEW" -> MainDestination.SMS_REVIEW
+            "planning" -> MainDestination.PLANNING_MORE
+            "budgets" -> MainDestination.BUDGETS_REPORTS
+            else -> MainDestination.DASHBOARD
         }
 
         setContent {
-            val vm: SaidiQershViewModel = viewModel(factory = SaidiQershViewModel.Factory(repository))
+            val vm: SaidiQershViewModel = viewModel(
+                factory = SaidiQershViewModel.Factory(repository, applicationContext)
+            )
             val darkPref by vm.isDarkModePreferred.collectAsStateWithLifecycle()
             val isDark = darkPref ?: isSystemInDarkTheme()
 

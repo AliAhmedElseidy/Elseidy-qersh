@@ -71,8 +71,13 @@ data class TransactionFilterState(
 )
 
 class SaidiQershViewModel(
-    private val repository: SaidiQershRepository
+    private val repository: SaidiQershRepository,
+    private val appContext: Context? = null
 ) : ViewModel() {
+
+    private val prefs by lazy {
+        appContext?.applicationContext?.getSharedPreferences("saidi_qersh_prefs", Context.MODE_PRIVATE)
+    }
 
     private val _filterState = MutableStateFlow(TransactionFilterState())
     val filterState: StateFlow<TransactionFilterState> = _filterState.asStateFlow()
@@ -158,6 +163,21 @@ class SaidiQershViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
+        prefs?.let { sp ->
+            val savedPinHash = sp.getString("pin_hash", null)?.takeIf { it.isNotBlank() }
+            if (savedPinHash != null) {
+                _pinCode.value = savedPinHash
+                _isAppUnlocked.value = false
+            }
+            when (sp.getString("dark_mode", "system")) {
+                "dark" -> _isDarkModePreferred.value = true
+                "light" -> _isDarkModePreferred.value = false
+                else -> _isDarkModePreferred.value = null
+            }
+            sp.getString("primary_currency", null)?.takeIf { it.isNotBlank() }?.let {
+                _selectedCurrency.value = it
+            }
+        }
         viewModelScope.launch {
             repository.ensureSeeded()
         }
@@ -259,11 +279,13 @@ class SaidiQershViewModel(
         val budgetLimit = totalBudgetObj?.limitMinor ?: 8000_00L
         val remainingBudget = budgetLimit - monthExpense
 
-        val cal = Calendar.getInstance()
-        val currentDay = cal.get(Calendar.DAY_OF_MONTH).coerceAtLeast(1)
-        val maxDay = cal.getActualMaximum(Calendar.DAY_OF_MONTH).coerceAtLeast(28)
-        val daysLeft = (maxDay - currentDay + 1).coerceAtLeast(1)
-        val dailySafeSpend = (remainingBudget.coerceAtLeast(0L)) / daysLeft
+        val rawDaysLeft = MoneyUtils.daysRemainingInYearMonth(selectedYm, now)
+        val daysLeft = rawDaysLeft
+        val dailySafeSpend = if (rawDaysLeft > 0) {
+            (remainingBudget.coerceAtLeast(0L)) / rawDaysLeft
+        } else {
+            0L
+        }
 
         val catMap = cats.associateBy { it.id }
         val expenseTxsThisMonth = monthTxs.filter {
@@ -286,9 +308,15 @@ class SaidiQershViewModel(
             .sortedByDescending { it.amountMinor }
 
         val insights = mutableListOf<String>()
-        insights.add(
-            "الحد اليومي الآمن للصرف: ${MoneyUtils.formatMinor(dailySafeSpend, cur)} يومياً خلال الـ $daysLeft يوماً المتبقية من الشهر."
-        )
+        if (rawDaysLeft > 0) {
+            insights.add(
+                "الحد اليومي الآمن للصرف: ${MoneyUtils.formatMinor(dailySafeSpend, cur)} يومياً خلال الـ $daysLeft يوماً المتبقية من الشهر."
+            )
+        } else {
+            insights.add(
+                "شهر ${MoneyUtils.formatYearMonthArabic(selectedYm)} منتهٍ؛ صافي المتبقي من الميزانية: ${MoneyUtils.formatMinor(remainingBudget, cur)}."
+            )
+        }
         breakdown.firstOrNull()?.let { topSlice ->
             val pctTop = (topSlice.percentage * 100).toInt()
             insights.add(
@@ -381,12 +409,30 @@ class SaidiQershViewModel(
 
     fun toggleDarkMode(dark: Boolean?) {
         _isDarkModePreferred.value = dark
+        prefs?.edit()?.putString(
+            "dark_mode",
+            when (dark) {
+                true -> "dark"
+                false -> "light"
+                null -> "system"
+            }
+        )?.apply()
     }
 
     fun setPinProtection(newPin: String?) {
-        _pinCode.value = newPin?.takeIf { it.length >= 4 }
-        _isAppUnlocked.value = true
-        showBanner(if (newPin.isNullOrBlank()) "تم إلغاء قفل الرمز السري (PIN)" else "تم تفعيل حماية التطبيق برمز PIN")
+        val cleanPin = newPin?.trim()?.takeIf { it.length >= 4 }
+        if (cleanPin == null) {
+            _pinCode.value = null
+            _isAppUnlocked.value = true
+            prefs?.edit()?.remove("pin_hash")?.apply()
+            showBanner("تم إلغاء قفل الرمز السري (PIN)")
+        } else {
+            val hashed = MoneyUtils.hashPinCode(cleanPin)
+            _pinCode.value = hashed
+            _isAppUnlocked.value = true
+            prefs?.edit()?.putString("pin_hash", hashed)?.apply()
+            showBanner("تم تفعيل حماية التطبيق برمز PIN مشفّر")
+        }
     }
 
     fun lockAppNow() {
@@ -397,7 +443,7 @@ class SaidiQershViewModel(
 
     fun tryUnlockWithPin(enteredPin: String): Boolean {
         val current = _pinCode.value
-        if (current == null || current == enteredPin) {
+        if (current.isNullOrBlank() || MoneyUtils.verifyPinCode(enteredPin, current)) {
             _isAppUnlocked.value = true
             return true
         }
@@ -703,19 +749,29 @@ class SaidiQershViewModel(
         overrideNotes: String? = null
     ) {
         viewModelScope.launch {
+            val item = suggestedTransactions.value.firstOrNull { it.id == suggestedId }
+            if (item?.isTestSandbox == true) {
+                showBanner("تنبيه أمان: هذه الرسالة عينة اختبار تجريبية (Sandbox) ومعزولة عن الحسابات والأرصدة الحقيقية")
+                return@launch
+            }
+            val effectiveAccountId = overrideAccountId ?: item?.suggestedAccountId
+            if (effectiveAccountId == null) {
+                showBanner("يرجى اختيار الحساب المرتبط يدوياً أولاً (لم تتم مطابقة الحساب بنسبة 100%)")
+                return@launch
+            }
             val txId = repository.confirmSuggestedTransaction(
                 suggestedId = suggestedId,
                 overrideAmountMinor = overrideAmountMinor,
                 overrideMerchant = overrideMerchant,
                 overrideCategoryId = overrideCategoryId,
-                overrideAccountId = overrideAccountId,
+                overrideAccountId = effectiveAccountId,
                 overrideToAccountId = overrideToAccountId,
                 overrideNotes = overrideNotes
             )
             if (txId != null) {
                 showBanner("تمت إضافة العملية وتسجيلها وتحديث الأرصدة وذاكرة التاجر الذكية بنجاح")
             } else {
-                showBanner("يرجى تحديد المبلغ أولاً قبل إضافة العملية")
+                showBanner("تعذر تأكيد العملية: يرجى التأكد من تحديد المبلغ والحساب المرتبط")
             }
         }
     }
@@ -982,10 +1038,13 @@ class SaidiQershViewModel(
         }
     }
 
-    class Factory(private val repository: SaidiQershRepository) : ViewModelProvider.Factory {
+    class Factory(
+        private val repository: SaidiQershRepository,
+        private val appContext: Context? = null
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return SaidiQershViewModel(repository) as T
+            return SaidiQershViewModel(repository, appContext) as T
         }
     }
 }

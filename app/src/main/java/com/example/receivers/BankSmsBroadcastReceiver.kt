@@ -71,24 +71,7 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 }
             }
 
-            ACTION_APPROVE_SMS_NOTIFICATION -> {
-                val suggestedId = intent.getLongExtra(EXTRA_SUGGESTED_ID, -1L)
-                val notificationId = intent.getIntExtra(EXTRA_NOTIFICATION_ID, -1)
-                if (suggestedId <= 0L) return
-
-                val pendingResult = goAsync()
-                CoroutineScope(Dispatchers.IO).launch {
-                    try {
-                        val db = SaidiQershDatabase.getInstance(context.applicationContext)
-                        val dao = db.dao()
-                        dao.confirmSuggestedTransaction(suggestedId)
-                        dismissNotification(context.applicationContext, notificationId)
-                    } finally {
-                        pendingResult.finish()
-                    }
-                }
-            }
-
+            ACTION_APPROVE_SMS_NOTIFICATION,
             ACTION_IGNORE_SMS_NOTIFICATION -> {
                 val suggestedId = intent.getLongExtra(EXTRA_SUGGESTED_ID, -1L)
                 val notificationId = intent.getIntExtra(EXTRA_NOTIFICATION_ID, -1)
@@ -97,27 +80,12 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 val pendingResult = goAsync()
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
-                        val db = SaidiQershDatabase.getInstance(context.applicationContext)
-                        val dao = db.dao()
-                        val item = dao.getSuggestedById(suggestedId)
-                        if (item != null && item.status != ReviewStatus.CONFIRMED) {
-                            val now = System.currentTimeMillis()
-                            dao.updateSuggestedTransaction(
-                                item.copy(status = ReviewStatus.IGNORED, reviewedAt = now)
-                            )
-                            dao.insertAuditLog(
-                                ImportAuditLogEntity(
-                                    eventType = "SMS_IGNORED_FROM_NOTIFICATION",
-                                    entityType = "SuggestedTransaction",
-                                    entityId = item.id,
-                                    sourceDescription = item.bankName,
-                                    details = "تم تجاهل الرسالة من إشعار النظام مباشرة: ${item.merchantName}",
-                                    reviewStatus = ReviewStatus.IGNORED.name,
-                                    timestamp = now
-                                )
-                            )
-                        }
-                        dismissNotification(context.applicationContext, notificationId)
+                        SmsNotificationActionReceiver.handleNotificationAction(
+                            context = context.applicationContext,
+                            action = action,
+                            suggestedId = suggestedId,
+                            notificationId = notificationId
+                        )
                     } finally {
                         pendingResult.finish()
                     }
@@ -255,12 +223,9 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 dao.getSuggestedByRefAndBank(ref, parsed.bankName)
             }
 
+            // منع إسناد العمليات البنكية لحساب خاطئ (إلغاء الـ Fallback العشوائي):
+            // إذا لم يتم مطابقة رقم الحساب أو البنك بنسبة 100%، لا يتم تخمين الحساب بل يظل null ويتطلب تدخل المستخدم يدوياً
             val matchedAccount = parsed.matchedAccountId?.let { id -> accounts.firstOrNull { it.id == id } }
-                ?: accounts.firstOrNull {
-                    it.smsParsingEnabled && (senderBank != null && it.bankId == senderBank.id)
-                }
-                ?: accounts.firstOrNull { it.smsParsingEnabled }
-                ?: accounts.firstOrNull()
 
             val finalStatus = if (existingByRef != null) {
                 ReviewStatus.DUPLICATE
@@ -294,7 +259,10 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
             if (insertedId <= 0L) return null
 
             // Toggle 2: إذا كان "اعتماد وتسجيل تلقائي فوري (Auto-Approve)" مفعلاً لهذه الجهة
-            if (isAutoApprove &&
+            // بشرط عزل عينات الاختبار (!isTestSandbox) ومطابقة الحساب بنسبة 100% (matchedAccount != null)
+            if (!isTestSandbox &&
+                isAutoApprove &&
+                matchedAccount != null &&
                 finalStatus == ReviewStatus.PENDING &&
                 parsed.extractedAmountMinor != null &&
                 parsed.extractedAmountMinor > 0L
@@ -324,14 +292,15 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 )
             )
 
-            if (sendSystemNotification && (finalStatus == ReviewStatus.PENDING || finalStatus == ReviewStatus.UNCLEAR)) {
+            if (!isTestSandbox && sendSystemNotification && (finalStatus == ReviewStatus.PENDING || finalStatus == ReviewStatus.UNCLEAR)) {
                 postReviewRequiredNotification(
                     context = context,
                     suggestedId = insertedId,
                     bankName = parsed.bankName,
                     amountMinor = parsed.extractedAmountMinor,
                     currency = parsed.currency,
-                    merchantName = parsed.merchantName.ifBlank { parsed.suggestedType.titleAr }
+                    merchantName = parsed.merchantName.ifBlank { parsed.suggestedType.titleAr },
+                    hasMatchedAccount = matchedAccount != null
                 )
             }
 
@@ -435,6 +404,7 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
             val openIntent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra(EXTRA_OPEN_SMS_REVIEW, true)
+                putExtra("open_tab", "SMS_REVIEW")
             }
             val contentPendingIntent = PendingIntent.getActivity(
                 context,
@@ -466,7 +436,8 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
             bankName: String,
             amountMinor: Long?,
             currency: String,
-            merchantName: String
+            merchantName: String,
+            hasMatchedAccount: Boolean = true
         ) {
             ensureBankSmsNotificationChannel(context)
             if (!canPostNotifications(context)) return
@@ -474,11 +445,16 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             val notificationId = (10000 + (suggestedId % 10000)).toInt()
             val formattedAmount = amountMinor?.let { MoneyUtils.formatMinorTwoDecimals(it, currency) } ?: "غير محدد"
-            val messageText = "📩 رسالة مالية جديدة من $bankName بمبلغ $formattedAmount - اضغط للمراجعة أو الاعتماد"
+            val messageText = if (hasMatchedAccount) {
+                "📩 رسالة مالية جديدة من $bankName بمبلغ $formattedAmount - اضغط للمراجعة أو الاعتماد"
+            } else {
+                "📩 رسالة مالية من $bankName بمبلغ $formattedAmount - تتطلب اختيار الحساب يدوياً"
+            }
 
             val openIntent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra(EXTRA_OPEN_SMS_REVIEW, true)
+                putExtra("open_tab", "SMS_REVIEW")
             }
             val contentPendingIntent = PendingIntent.getActivity(
                 context,
@@ -487,7 +463,7 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            val approveIntent = Intent(context, BankSmsBroadcastReceiver::class.java).apply {
+            val approveIntent = Intent(context, SmsNotificationActionReceiver::class.java).apply {
                 action = ACTION_APPROVE_SMS_NOTIFICATION
                 putExtra(EXTRA_SUGGESTED_ID, suggestedId)
                 putExtra(EXTRA_NOTIFICATION_ID, notificationId)
@@ -499,7 +475,7 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            val ignoreIntent = Intent(context, BankSmsBroadcastReceiver::class.java).apply {
+            val ignoreIntent = Intent(context, SmsNotificationActionReceiver::class.java).apply {
                 action = ACTION_IGNORE_SMS_NOTIFICATION
                 putExtra(EXTRA_SUGGESTED_ID, suggestedId)
                 putExtra(EXTRA_NOTIFICATION_ID, notificationId)
@@ -520,7 +496,7 @@ class BankSmsBroadcastReceiver : BroadcastReceiver() {
                 .setAutoCancel(true)
                 .setContentIntent(contentPendingIntent)
 
-            if (amountMinor != null && amountMinor > 0L) {
+            if (hasMatchedAccount && amountMinor != null && amountMinor > 0L) {
                 builder.addAction(
                     android.R.drawable.ic_input_add,
                     "أضف",

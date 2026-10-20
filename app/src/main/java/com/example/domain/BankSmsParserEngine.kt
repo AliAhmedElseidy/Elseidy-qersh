@@ -236,11 +236,17 @@ object BankSmsParserEngine {
         val merchantName = extractMerchant(normalizedBody, detectedType)
 
         // 8. البحث في ذاكرة التاجر الذكية (Smart Merchant Memory) لتطبيق التصنيف والحساب المختارين سابقاً
+        // مع عدم تجاوز مطابقة أرقام الحساب/البطاقة الصريحة أو البنك المختلف في الرسالة
         val rememberedMerchant = findMerchantMemory(merchantName, merchantMemories)
         val rememberedAccount = rememberedMerchant?.accountId?.let { memAccId ->
-            accounts.firstOrNull { it.id == memAccId }
+            accounts.firstOrNull { acc ->
+                acc.id == memAccId &&
+                    (matchedBank == null || acc.bankId == null || acc.bankId == matchedBank.id) &&
+                    (extractedAccLast4.isBlank() || acc.accountLast4.isBlank() || acc.accountLast4 == extractedAccLast4) &&
+                    (extractedCardLast4.isBlank() || acc.cardLast4.isBlank() || acc.cardLast4 == extractedCardLast4)
+            }
         }
-        val finalMatchedAccount = rememberedAccount ?: smartMatchedAccount
+        val finalMatchedAccount = smartMatchedAccount ?: rememberedAccount
 
         // 9. إذا لم يمكن استخراج المبلغ أو نوع العملية بثقة -> قائمة غير واضحة (UNCLEAR)
         if (detectedType == SmsSuggestedType.UNCLEAR || amountMinor == null || amountMinor <= 0L) {
@@ -390,8 +396,10 @@ object BankSmsParserEngine {
     }
 
     /**
-     * الربط الذكي للحسابات والبطاقات بناءً على آخر 4 أرقام للحساب أو البطاقة، ثم البنك الفعلي المطابق فقط.
-     * لا ينسب الرسالة قسراً لحساب الإنماء أو الراجحي إذا كانت من جهة أخرى!
+     * الربط الذكي الصارم (100% Match) للحسابات والبطاقات:
+     * - يطابق أولاً بآخر 4 أرقام للحساب أو البطاقة.
+     * - إذا تضمنت الرسالة أرقام حساب/بطاقة لا تطابق أي حساب مسجل، لا يقوم بتخمين حساب آخر له أرقام مختلفة.
+     * - عند المطابقة بالبنك فقط، يشترط وجود حساب واحد فقط مفعل لهذا البنك دون تعارض في الأرقام، وإلا يعيد null لتظل العملية معلقة لاختيار المستخدم يدوياً.
      */
     fun matchAccountByLast4OrBank(
         extractedAccountLast4: String,
@@ -400,52 +408,50 @@ object BankSmsParserEngine {
         senderAddress: String,
         accounts: List<AccountEntity>
     ): AccountEntity? {
-        if (accounts.isEmpty()) return null
+        val smsAccounts = accounts.filter { it.smsParsingEnabled }
+        if (smsAccounts.isEmpty()) return null
 
-        // 1. مطابقة مباشرة مع آخر 4 أرقام من الحساب
+        // 1. مطابقة بنسبة 100% مع آخر 4 أرقام من الحساب
         if (extractedAccountLast4.isNotBlank()) {
-            val byAccLast4 = accounts.firstOrNull {
-                it.accountLast4 == extractedAccountLast4 || it.cardLast4 == extractedAccountLast4 || it.name.contains(extractedAccountLast4)
+            val accMatches = smsAccounts.filter {
+                it.accountLast4 == extractedAccountLast4 || it.cardLast4 == extractedAccountLast4
             }
-            if (byAccLast4 != null) return byAccLast4
+            if (accMatches.size == 1) return accMatches.first()
         }
 
-        // 2. مطابقة مباشرة مع آخر 4 أرقام من البطاقة
+        // 2. مطابقة بنسبة 100% مع آخر 4 أرقام من البطاقة
         if (extractedCardLast4.isNotBlank()) {
-            val byCardLast4 = accounts.firstOrNull {
-                it.cardLast4 == extractedCardLast4 || it.accountLast4 == extractedCardLast4 || it.name.contains(extractedCardLast4)
+            val cardMatches = smsAccounts.filter {
+                it.cardLast4 == extractedCardLast4 || it.accountLast4 == extractedCardLast4
             }
-            if (byCardLast4 != null) return byCardLast4
+            if (cardMatches.size == 1) return cardMatches.first()
         }
 
-        // 3. مطابقة بناءً على البنك الفعلي المكتشف
+        // إذا كانت الرسالة تحتوي على رقم حساب أو بطاقة محدد لم يطابق أياً من الحسابات أعلاه،
+        // نتحقق مما إذا كان هناك حساب للبنك لم يُحدد له رقم حساب/بطاقة بعد، وإلا نمنع التخمين تماماً
+        val hasExplicitUnmatchedDigits = extractedAccountLast4.isNotBlank() || extractedCardLast4.isNotBlank()
+
+        // 3. مطابقة بناءً على البنك الفعلي المكتشف بشرط عدم وجود تعارض في الأرقام وعدم تعدد الحسابات لنفس البنك
         if (matchedBank != null) {
-            val byBankId = accounts.firstOrNull { it.bankId == matchedBank.id && it.smsParsingEnabled }
-                ?: accounts.firstOrNull {
-                    it.smsParsingEnabled && (
-                        it.bankName.contains(matchedBank.nameAr.take(6), ignoreCase = true) ||
-                            it.name.contains(matchedBank.nameEn.take(5), ignoreCase = true) ||
-                            it.name.contains(matchedBank.code, ignoreCase = true)
-                        )
-                }
-            if (byBankId != null) return byBankId
+            val bankCandidates = smsAccounts.filter { acc ->
+                val sameBank = acc.bankId == matchedBank.id ||
+                    (acc.bankName.isNotBlank() && acc.bankName.contains(matchedBank.nameAr.take(6), ignoreCase = true)) ||
+                    acc.name.contains(matchedBank.code, ignoreCase = true)
+                val noDigitConflict = !hasExplicitUnmatchedDigits ||
+                    ((extractedAccountLast4.isBlank() || acc.accountLast4.isBlank()) &&
+                        (extractedCardLast4.isBlank() || acc.cardLast4.isBlank()))
+                sameBank && noDigitConflict
+            }
+            if (bankCandidates.size == 1) return bankCandidates.first()
         }
 
-        // 4. مطابقة اسم الحساب مباشرة مع اسم المرسل (مثل حساب فودافون كاش أو حساب Urpay أو STC Pay)
-        if (senderAddress.isNotBlank()) {
-            val bySenderName = accounts.firstOrNull { acc ->
-                acc.name.contains(senderAddress, ignoreCase = true) ||
-                    acc.bankName.contains(senderAddress, ignoreCase = true)
+        // 4. مطابقة اسم الحساب مباشرة مع اسم المرسل الصريح بشرط التفرد وعدم تعارض الأرقام
+        if (senderAddress.isNotBlank() && !hasExplicitUnmatchedDigits) {
+            val senderCandidates = smsAccounts.filter { acc ->
+                acc.name.equals(senderAddress, ignoreCase = true) ||
+                    acc.bankName.equals(senderAddress, ignoreCase = true)
             }
-            if (bySenderName != null) return bySenderName
-        }
-
-        // 5. إذا كانت الرسالة تحتوي على حساب *2000 أو بطاقة *5650
-        if (extractedAccountLast4 == "2000" || extractedCardLast4 == "5650") {
-            val alinmaAcc = accounts.firstOrNull {
-                it.name.contains("الإنماء") || it.name.contains("الانماء") || it.bankName.contains("الإنماء")
-            }
-            if (alinmaAcc != null) return alinmaAcc
+            if (senderCandidates.size == 1) return senderCandidates.first()
         }
 
         return null

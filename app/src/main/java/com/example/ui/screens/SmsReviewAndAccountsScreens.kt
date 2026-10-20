@@ -257,7 +257,12 @@ fun SmsReviewScreen(
                             item = item,
                             matchedAccountName = matchedAccountName,
                             onConfirm = {
-                                if (item.extractedAmountMinor != null && item.extractedAmountMinor > 0L) {
+                                if (item.isTestSandbox) {
+                                    onConfirmSuggested(item.id)
+                                } else if (item.extractedAmountMinor != null &&
+                                    item.extractedAmountMinor > 0L &&
+                                    item.suggestedAccountId != null
+                                ) {
                                     onConfirmSuggested(item.id)
                                 } else {
                                     editingSuggested = item
@@ -403,6 +408,14 @@ fun SmsReviewScreen(
             onSaveEdit = { amtText, merchant, catId, accId, sType ->
                 onEditSuggestedBeforeConfirm(target, amtText, merchant, catId, accId, sType)
                 editingSuggested = null
+            },
+            onSaveAndConfirm = { amtText, merchant, catId, accId, sType ->
+                onEditSuggestedBeforeConfirm(target, amtText, merchant, catId, accId, sType)
+                val minor = MoneyUtils.parseToMinorUnits(amtText)
+                if (!target.isTestSandbox && minor != null && minor > 0L && accId != null) {
+                    onConfirmSuggested(target.id)
+                }
+                editingSuggested = null
             }
         )
     }
@@ -521,16 +534,40 @@ fun SuggestedTransactionReviewCard(
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.primary
                         )
+                        if (item.isTestSandbox) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = WarningAmber.copy(alpha = 0.18f)
+                            ) {
+                                Text(
+                                    text = "🧪 عينة اختبار معزولة (Sandbox)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = WarningAmber,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
                         if (matchedAccountName != null || item.extractedAccountLast4.isNotBlank() || item.extractedCardLast4.isNotBlank()) {
                             val badgeText = buildString {
-                                if (matchedAccountName != null) append(matchedAccountName)
+                                if (matchedAccountName != null) {
+                                    append(matchedAccountName)
+                                } else {
+                                    append("⚠️ الحساب غير مطابق 100% (اختر الحساب يدوياً)")
+                                }
                                 if (item.extractedAccountLast4.isNotBlank()) append(" • حساب *${item.extractedAccountLast4}")
                                 if (item.extractedCardLast4.isNotBlank()) append(" • بطاقة *${item.extractedCardLast4}")
                             }
                             Text(
                                 text = badgeText,
                                 style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = if (matchedAccountName != null) MaterialTheme.colorScheme.onSurfaceVariant else WarningAmber
+                            )
+                        } else {
+                            Text(
+                                text = "⚠️ الحساب غير مطابق تلقائياً (يتطلب اختيار الحساب يدوياً)",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = WarningAmber
                             )
                         }
                     }
@@ -613,13 +650,25 @@ fun SuggestedTransactionReviewCard(
                         .testTag("confirm_sms_btn_${item.id}"),
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
+                        containerColor = if (item.isTestSandbox) {
+                            MaterialTheme.colorScheme.secondary
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        }
                     )
                 ) {
-                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(
+                        imageVector = if (matchedAccountName == null && !item.isTestSandbox) Icons.Default.Edit else Icons.Default.Check,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        text = "أضف",
+                        text = when {
+                            item.isTestSandbox -> "عينة اختبار (معزولة)"
+                            matchedAccountName == null -> "اختر الحساب وأضف"
+                            else -> "أضف"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -690,7 +739,8 @@ private fun EditSuggestedTransactionDialog(
     accounts: List<AccountEntity>,
     categories: List<CategoryEntity>,
     onDismiss: () -> Unit,
-    onSaveEdit: (String, String, Long?, Long?, SmsSuggestedType) -> Unit
+    onSaveEdit: (String, String, Long?, Long?, SmsSuggestedType) -> Unit,
+    onSaveAndConfirm: ((String, String, Long?, Long?, SmsSuggestedType) -> Unit)? = null
 ) {
     var amountText by remember {
         mutableStateOf(item.extractedAmountMinor?.let { MoneyUtils.formatPlainDecimal(it) } ?: "")
@@ -740,7 +790,7 @@ private fun EditSuggestedTransactionDialog(
                 }
 
                 if (accounts.isNotEmpty()) {
-                    Text("الحساب المرتبط:", style = MaterialTheme.typography.labelLarge)
+                    Text("الحساب المرتبط (إجباري للتأكيد):", style = MaterialTheme.typography.labelLarge)
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -772,11 +822,21 @@ private fun EditSuggestedTransactionDialog(
             }
         },
         confirmButton = {
-            Button(
-                onClick = { onSaveEdit(amountText, merchant, selectedCatId, selectedAccId, selectedType) },
-                modifier = Modifier.testTag("save_suggested_edit_btn")
-            ) {
-                Text("حفظ التعديل")
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (onSaveAndConfirm != null && !item.isTestSandbox) {
+                    Button(
+                        onClick = { onSaveAndConfirm(amountText, merchant, selectedCatId, selectedAccId, selectedType) },
+                        modifier = Modifier.testTag("save_and_confirm_suggested_btn")
+                    ) {
+                        Text("حفظ وتأكيد العملية")
+                    }
+                }
+                FilledTonalButton(
+                    onClick = { onSaveEdit(amountText, merchant, selectedCatId, selectedAccId, selectedType) },
+                    modifier = Modifier.testTag("save_suggested_edit_btn")
+                ) {
+                    Text("حفظ التعديل")
+                }
             }
         },
         dismissButton = {

@@ -224,12 +224,9 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
             dao.getSuggestedByRefAndBank(ref, parsed.bankName)
         }
 
+        // منع إسناد العمليات البنكية لحساب خاطئ (إلغاء الـ Fallback العشوائي):
+        // إذا لم يتم مطابقة رقم الحساب أو البنك بنسبة 100%، لا يتم تخمين الحساب وتظل العملية معلقة لاختيار المستخدم يدوياً
         val matchedAccount = parsed.matchedAccountId?.let { id -> accounts.firstOrNull { it.id == id } }
-            ?: accounts.firstOrNull {
-                it.smsParsingEnabled && (senderBank != null && it.bankId == senderBank.id)
-            }
-            ?: accounts.firstOrNull { it.smsParsingEnabled }
-            ?: accounts.firstOrNull()
 
         val status = if (existingByRef != null) ReviewStatus.DUPLICATE else parsed.reviewStatus
 
@@ -256,8 +253,12 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
 
         val id = dao.insertSuggestedTransaction(entity)
         if (id > 0L) {
-            // Toggle 2: اعتماد وتسجيل تلقائي فوري (Auto-Approve) إذا كان مفعلاً لهذه الجهة
-            if (isAutoApprove &&
+            // Toggle 2: اعتماد وتسجيل تلقائي فوري (Auto-Approve) بشرط:
+            // 1) ألا تكون الرسالة عينة اختبار (Sandbox Isolation)
+            // 2) أن يكون الحساب مطابقاً بنسبة 100% (matchedAccount != null)
+            if (!isTestSandbox &&
+                isAutoApprove &&
+                matchedAccount != null &&
                 status == ReviewStatus.PENDING &&
                 parsed.extractedAmountMinor != null &&
                 parsed.extractedAmountMinor > 0L
@@ -459,10 +460,17 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
         val accounts = dao.getAllAccounts()
         val txs = dao.getAllConfirmedTransactions()
         val categories = dao.getAllCategories()
+        val budgets = dao.getAllBudgets()
+        val obligations = dao.getAllObligations()
+        val savingsGoals = dao.getAllSavingsGoals()
+        val shoppingLists = dao.getAllShoppingLists()
+        val shoppingItems = dao.getAllShoppingItems()
+        val ignoredKeywords = dao.getAllIgnoredKeywords()
+        val merchantMemories = dao.getAllMerchantMemories()
 
         val root = JSONObject()
         root.put("app", "SaidiQersh")
-        root.put("schemaVersion", 2)
+        root.put("schemaVersion", 4)
         root.put("exportedAt", System.currentTimeMillis())
 
         val accArr = JSONArray()
@@ -472,12 +480,14 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
                     put("id", a.id)
                     put("name", a.name)
                     put("type", a.type.name)
+                    put("bankId", a.bankId ?: JSONObject.NULL)
                     put("bankName", a.bankName)
                     put("currency", a.currency)
                     put("openingBalanceMinor", a.openingBalanceMinor)
                     put("currentBalanceMinor", a.currentBalanceMinor)
                     put("accountLast4", a.accountLast4)
                     put("cardLast4", a.cardLast4)
+                    put("smsParsingEnabled", a.smsParsingEnabled)
                 }
             )
         }
@@ -511,6 +521,8 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
                     put("accountId", t.accountId)
                     put("toAccountId", t.toAccountId ?: JSONObject.NULL)
                     put("categoryId", t.categoryId ?: JSONObject.NULL)
+                    put("bankId", t.bankId ?: JSONObject.NULL)
+                    put("bankName", t.bankName)
                     put("merchantName", t.merchantName)
                     put("referenceNumber", t.referenceNumber ?: "")
                     put("source", t.source.name)
@@ -518,6 +530,116 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
             )
         }
         root.put("transactions", txArr)
+
+        val budgetArr = JSONArray()
+        for (b in budgets) {
+            budgetArr.put(
+                JSONObject().apply {
+                    put("id", b.id)
+                    put("yearMonth", b.yearMonth)
+                    put("categoryKey", b.categoryKey)
+                    put("categoryId", b.categoryId ?: JSONObject.NULL)
+                    put("categoryName", b.categoryName)
+                    put("limitMinor", b.limitMinor)
+                    put("currency", b.currency)
+                }
+            )
+        }
+        root.put("budgets", budgetArr)
+
+        val oblArr = JSONArray()
+        for (o in obligations) {
+            oblArr.put(
+                JSONObject().apply {
+                    put("id", o.id)
+                    put("title", o.title)
+                    put("kind", o.kind.name)
+                    put("totalAmountMinor", o.totalAmountMinor)
+                    put("installmentAmountMinor", o.installmentAmountMinor)
+                    put("paidAmountMinor", o.paidAmountMinor)
+                    put("currency", o.currency)
+                    put("dueDateMillis", o.dueDateMillis)
+                    put("isRecurring", o.isRecurring)
+                    put("recurrenceMonths", o.recurrenceMonths)
+                    put("roscaPayoutMonth", o.roscaPayoutMonth)
+                    put("isCompleted", o.isCompleted)
+                }
+            )
+        }
+        root.put("obligations", oblArr)
+
+        val savArr = JSONArray()
+        for (g in savingsGoals) {
+            savArr.put(
+                JSONObject().apply {
+                    put("id", g.id)
+                    put("title", g.title)
+                    put("targetAmountMinor", g.targetAmountMinor)
+                    put("currentAmountMinor", g.currentAmountMinor)
+                    put("currency", g.currency)
+                    put("targetDateMillis", g.targetDateMillis)
+                    put("isCompleted", g.isCompleted)
+                }
+            )
+        }
+        root.put("savingsGoals", savArr)
+
+        val listArr = JSONArray()
+        for (l in shoppingLists) {
+            listArr.put(
+                JSONObject().apply {
+                    put("id", l.id)
+                    put("title", l.title)
+                    put("currency", l.currency)
+                    put("isArchived", l.isArchived)
+                    put("recordedAsExpense", l.recordedAsExpense)
+                }
+            )
+        }
+        root.put("shoppingLists", listArr)
+
+        val itemArr = JSONArray()
+        for (it in shoppingItems) {
+            itemArr.put(
+                JSONObject().apply {
+                    put("id", it.id)
+                    put("listId", it.listId)
+                    put("name", it.name)
+                    put("quantity", it.quantity)
+                    put("estimatedUnitPriceMinor", it.estimatedUnitPriceMinor)
+                    put("isPurchased", it.isPurchased)
+                }
+            )
+        }
+        root.put("shoppingItems", itemArr)
+
+        val kwArr = JSONArray()
+        for (k in ignoredKeywords) {
+            kwArr.put(
+                JSONObject().apply {
+                    put("keyword", k.keyword)
+                    put("isActive", k.isActive)
+                    put("isDefault", k.isDefault)
+                }
+            )
+        }
+        root.put("ignoredKeywords", kwArr)
+
+        val memArr = JSONArray()
+        for (m in merchantMemories) {
+            memArr.put(
+                JSONObject().apply {
+                    put("normalizedMerchant", m.normalizedMerchant)
+                    put("merchantDisplayName", m.merchantDisplayName)
+                    put("categoryId", m.categoryId ?: JSONObject.NULL)
+                    put("categoryName", m.categoryName)
+                    put("accountId", m.accountId ?: JSONObject.NULL)
+                    put("accountName", m.accountName)
+                    put("usageCount", m.usageCount)
+                }
+            )
+        }
+        root.put("merchantMemories", memArr)
 
         val plainJson = root.toString()
         return if (!passphrase.isNullOrBlank()) {
@@ -529,18 +651,34 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
 
     suspend fun restoreLocalBackupJson(payload: String, passphrase: String? = null): Result<Int> {
         return try {
-            val plainJson = if (payload.trim().startsWith("SQENC1:")) {
+            val trimmedPayload = payload.trim()
+            val plainJson = if (MoneyUtils.isEncryptedBackupPayload(trimmedPayload)) {
                 if (passphrase.isNullOrBlank()) {
                     return Result.failure(IllegalArgumentException("هذه النسخة الاحتياطية مشفرة وتحتاج إلى كلمة المرور لفك التشفير."))
                 }
-                MoneyUtils.decryptBackupPayload(payload.trim(), passphrase)
+                MoneyUtils.decryptBackupPayload(trimmedPayload, passphrase)
             } else {
-                payload.trim()
+                trimmedPayload
             }
 
             val root = JSONObject(plainJson)
             if (root.optString("app") != "SaidiQersh" || !root.has("accounts") || !root.has("transactions")) {
                 return Result.failure(IllegalArgumentException("ملف النسخة الاحتياطية غير صالح أو لا ينتمي لتطبيق الصعيدي قرش."))
+            }
+
+            root.optJSONArray("categories")?.let { catArr ->
+                for (i in 0 until catArr.length()) {
+                    val obj = catArr.getJSONObject(i)
+                    dao.insertCategory(
+                        CategoryEntity(
+                            id = obj.optLong("id", 0L),
+                            nameAr = obj.optString("nameAr", "أخرى"),
+                            type = CategoryType.valueOf(obj.optString("type", CategoryType.EXPENSE.name)),
+                            iconName = obj.optString("iconName", "📦"),
+                            colorHex = obj.optString("colorHex", "#0D4732")
+                        )
+                    )
+                }
             }
 
             val accArr = root.getJSONArray("accounts")
@@ -554,12 +692,14 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
                         id = obj.optLong("id", 0L),
                         name = obj.getString("name"),
                         type = AccountType.valueOf(obj.optString("type", AccountType.BANK.name)),
+                        bankId = if (obj.isNull("bankId")) null else obj.optLong("bankId"),
                         bankName = obj.optString("bankName", ""),
                         currency = obj.optString("currency", "SAR"),
                         openingBalanceMinor = obj.optLong("openingBalanceMinor", 0L),
                         currentBalanceMinor = obj.optLong("currentBalanceMinor", 0L),
                         accountLast4 = obj.optString("accountLast4", ""),
-                        cardLast4 = obj.optString("cardLast4", "")
+                        cardLast4 = obj.optString("cardLast4", ""),
+                        smsParsingEnabled = obj.optBoolean("smsParsingEnabled", true)
                     )
                 )
             }
@@ -580,12 +720,106 @@ class SaidiQershRepository(private val dao: SaidiQershDao) {
                             accountId = obj.getLong("accountId"),
                             toAccountId = if (obj.isNull("toAccountId")) null else obj.optLong("toAccountId"),
                             categoryId = if (obj.isNull("categoryId")) null else obj.optLong("categoryId"),
+                            bankId = if (obj.isNull("bankId")) null else obj.optLong("bankId"),
+                            bankName = obj.optString("bankName", ""),
                             merchantName = obj.optString("merchantName", ""),
                             referenceNumber = obj.optString("referenceNumber", "").ifBlank { null },
                             source = TransactionSource.valueOf(obj.optString("source", TransactionSource.MANUAL.name))
                         )
                     )
                     restoredCount++
+                }
+            }
+
+            root.optJSONArray("budgets")?.let { bArr ->
+                for (i in 0 until bArr.length()) {
+                    val obj = bArr.getJSONObject(i)
+                    dao.upsertBudget(
+                        BudgetEntity(
+                            id = obj.optLong("id", 0L),
+                            yearMonth = obj.optString("yearMonth", MoneyUtils.currentYearMonth()),
+                            categoryKey = obj.optString("categoryKey", "TOTAL"),
+                            categoryId = if (obj.isNull("categoryId")) null else obj.optLong("categoryId"),
+                            categoryName = obj.optString("categoryName", "الميزانية الشهرية الإجمالية"),
+                            limitMinor = obj.optLong("limitMinor", 8000_00L),
+                            currency = obj.optString("currency", "SAR")
+                        )
+                    )
+                }
+            }
+
+            root.optJSONArray("obligations")?.let { oArr ->
+                for (i in 0 until oArr.length()) {
+                    val obj = oArr.getJSONObject(i)
+                    dao.insertObligation(
+                        ObligationEntity(
+                            id = obj.optLong("id", 0L),
+                            title = obj.optString("title", ""),
+                            kind = ObligationKind.valueOf(obj.optString("kind", ObligationKind.INSTALLMENT_PLAN.name)),
+                            totalAmountMinor = obj.optLong("totalAmountMinor", 0L),
+                            installmentAmountMinor = obj.optLong("installmentAmountMinor", 0L),
+                            paidAmountMinor = obj.optLong("paidAmountMinor", 0L),
+                            currency = obj.optString("currency", "SAR"),
+                            dueDateMillis = obj.optLong("dueDateMillis", System.currentTimeMillis()),
+                            isRecurring = obj.optBoolean("isRecurring", false),
+                            recurrenceMonths = obj.optInt("recurrenceMonths", 1),
+                            roscaPayoutMonth = obj.optString("roscaPayoutMonth", ""),
+                            isCompleted = obj.optBoolean("isCompleted", false)
+                        )
+                    )
+                }
+            }
+
+            root.optJSONArray("savingsGoals")?.let { sArr ->
+                for (i in 0 until sArr.length()) {
+                    val obj = sArr.getJSONObject(i)
+                    dao.insertSavingsGoal(
+                        SavingsGoalEntity(
+                            id = obj.optLong("id", 0L),
+                            title = obj.optString("title", ""),
+                            targetAmountMinor = obj.optLong("targetAmountMinor", 0L),
+                            currentAmountMinor = obj.optLong("currentAmountMinor", 0L),
+                            currency = obj.optString("currency", "SAR"),
+                            targetDateMillis = obj.optLong("targetDateMillis", System.currentTimeMillis()),
+                            isCompleted = obj.optBoolean("isCompleted", false)
+                        )
+                    )
+                }
+            }
+
+            root.optJSONArray("ignoredKeywords")?.let { kArr ->
+                for (i in 0 until kArr.length()) {
+                    val obj = kArr.getJSONObject(i)
+                    val kw = obj.optString("keyword", "").trim()
+                    if (kw.isNotEmpty()) {
+                        dao.insertIgnoredKeyword(
+                            IgnoredKeywordEntity(
+                                keyword = kw,
+                                isActive = obj.optBoolean("isActive", true),
+                                isDefault = obj.optBoolean("isDefault", false)
+                            )
+                        )
+                    }
+                }
+            }
+
+            root.optJSONArray("merchantMemories")?.let { mArr ->
+                for (i in 0 until mArr.length()) {
+                    val obj = mArr.getJSONObject(i)
+                    val norm = obj.optString("normalizedMerchant", "").trim()
+                    if (norm.isNotEmpty()) {
+                        dao.insertMerchantMemory(
+                            MerchantMemoryEntity(
+                                normalizedMerchant = norm,
+                                merchantDisplayName = obj.optString("merchantDisplayName", norm),
+                                categoryId = if (obj.isNull("categoryId")) null else obj.optLong("categoryId"),
+                                categoryName = obj.optString("categoryName", ""),
+                                accountId = if (obj.isNull("accountId")) null else obj.optLong("accountId"),
+                                accountName = obj.optString("accountName", ""),
+                                usageCount = obj.optInt("usageCount", 1)
+                            )
+                        )
+                    }
                 }
             }
 

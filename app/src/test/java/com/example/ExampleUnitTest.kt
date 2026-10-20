@@ -281,5 +281,54 @@ class ExampleUnitTest {
         assertEquals(2L, parsed.suggestedCategoryId)
         assertEquals(20L, parsed.matchedAccountId)
     }
+
+    @Test
+    fun backupEncryption_generatesUniqueRandomSaltAndIvInJsonHeader_andDecryptsAccurately() {
+        val rawJson = """{"version":4,"accounts":[{"name":"حساب الإنماء","balance":50000}]}"""
+        val pass = "SaidiStrongPass#2026"
+
+        val encrypted1 = MoneyUtils.encryptBackupPayload(rawJson, pass)
+        val encrypted2 = MoneyUtils.encryptBackupPayload(rawJson, pass)
+
+        // يجب أن يحتوي الغلاف على ترويسة JSON فيها salt و iv عشوائيان مختلفان في كل عملية تصدير
+        assertTrue(encrypted1.contains("\"encrypted\":true"))
+        assertTrue(encrypted1.contains("\"salt\""))
+        assertTrue(encrypted1.contains("\"iv\""))
+        assertNotEquals("Each backup export must generate a fresh random Salt & IV", encrypted1, encrypted2)
+
+        val decrypted1 = MoneyUtils.decryptBackupPayload(encrypted1, pass)
+        val decrypted2 = MoneyUtils.decryptBackupPayload(encrypted2, pass)
+        assertEquals(rawJson, decrypted1)
+        assertEquals(rawJson, decrypted2)
+    }
+
+    @Test
+    fun strictAccountMatching_neverGuessesFallbackAccountWhenDigitsMismatch() {
+        // الرسالة تحتوي على حساب *7777 غير مسجل في حسابات المستخدم (المسجل لإنماء هو *2000 فقط)
+        val smsWithUnknownDigits = "شراء عبر نقاط البيع مبلغ: ريال سعودي 120 بطاقة مدى: *8888 حساب: *7777 من: متجر تجريبي"
+        val parsed = BankSmsParserEngine.parseSms(
+            senderAddress = "Alinma",
+            rawBody = smsWithUnknownDigits,
+            knownBanks = sampleBanks,
+            accounts = sampleAccounts
+        )
+        assertEquals("7777", parsed.extractedAccountLast4)
+        assertEquals("8888", parsed.extractedCardLast4)
+        assertNull(
+            "Must NOT guess or fallback to Alinma *2000 account when SMS specifies *7777",
+            parsed.matchedAccountId
+        )
+    }
+
+    @Test
+    fun pinHashing_saltedSha256VerifiesAndSupportsLegacyMigration() {
+        val hash1 = MoneyUtils.hashPinCode("2580")
+        val hash2 = MoneyUtils.hashPinCode("2580")
+        assertNotEquals(hash1, hash2) // Random salt per hash
+        assertTrue(MoneyUtils.verifyPinCode("2580", hash1))
+        assertFalse(MoneyUtils.verifyPinCode("9999", hash1))
+        // Legacy plaintext fallback
+        assertTrue(MoneyUtils.verifyPinCode("2580", "2580"))
+    }
 }
 

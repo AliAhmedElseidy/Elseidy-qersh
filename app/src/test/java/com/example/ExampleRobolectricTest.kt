@@ -183,5 +183,90 @@ class ExampleRobolectricTest {
         assertEquals(shoppingCategory.id, suggestedTamara.suggestedCategoryId)
         assertEquals(rajhiAccount.id, suggestedTamara.suggestedAccountId)
     }
+
+    @Test
+    fun sandboxIsolation_andNoFallbackAccountGuessing_protectsRealBalances() = runBlocking {
+        // 1. تفعيل الاعتماد التلقائي لمصرف الإنماء
+        val alinmaBank = db.dao().getAllBanks().first { it.code == "ALINMA" }
+        repository.toggleBankAutoApprove(alinmaBank, true)
+
+        val alinmaAccBefore = db.dao().getAllAccounts().first { it.accountLast4 == "2000" }
+        val txCountBefore = db.dao().getAllConfirmedTransactions().size
+
+        // 2. إدخال عينة اختبار (isTestSandbox = true) حتى مع تفعيل Auto-Approve يجب ألا تعتمد تلقائياً ولا تؤثر على الرصيد
+        val sandboxId = repository.ingestBankSms(
+            senderAddress = "Alinma",
+            rawBody = "شراء عبر Samsung Wallet مبلغ: ريال سعودى 300 بطاقة مدى: *5650 حساب: *2000 من: متجر تجريبي مرجع: SBX300",
+            isTestSandbox = true
+        )
+        assertNotNull(sandboxId)
+        val sandboxEntity = db.dao().getSuggestedById(sandboxId!!)!!
+        assertEquals("Sandbox item must stay PENDING even when Auto-Approve is on", ReviewStatus.PENDING, sandboxEntity.status)
+
+        // محاولة تأكيد عينة الاختبار برمجياً يجب أن تُرفض تماماً لحماية الأرصدة الحقيقية
+        val confirmSandboxResult = repository.confirmSuggestedTransaction(sandboxId)
+        assertNull("Sandbox item must NEVER be confirmed into real transactions", confirmSandboxResult)
+        val alinmaAccAfterSandbox = db.dao().getAccountById(alinmaAccBefore.id)!!
+        assertEquals(alinmaAccBefore.currentBalanceMinor, alinmaAccAfterSandbox.currentBalanceMinor)
+        assertEquals(txCountBefore, db.dao().getAllConfirmedTransactions().size)
+
+        // 3. رسالة حقيقية لكن برقم حساب غير معروف (*4444) يجب ألا تخمّن حساباً احتياطياً وتظل معلقة بدون حساب حتى يختاره المستخدم يدوياً
+        val unmatchedId = repository.ingestBankSms(
+            senderAddress = "Alinma",
+            rawBody = "شراء عبر نقاط البيع مبلغ: ريال سعودي 95 بطاقة مدى: *3333 حساب: *4444 من: كافيه المساء مرجع: UNM95",
+            isTestSandbox = false
+        )
+        assertNotNull(unmatchedId)
+        val unmatchedEntity = db.dao().getSuggestedById(unmatchedId!!)!!
+        assertNull("Must NOT guess fallback account when digits *4444 do not match", unmatchedEntity.suggestedAccountId)
+        assertEquals("Unmatched account SMS must remain PENDING even when Auto-Approve is on", ReviewStatus.PENDING, unmatchedEntity.status)
+
+        // محاولة التأكيد بدون تحديد حساب تفشل وتظل معلقة
+        assertNull(repository.confirmSuggestedTransaction(unmatchedId))
+
+        // عند تحديد الحساب يدوياً من قِبل المستخدم تنجح العملية وتُخصم من الحساب المختار
+        val manualConfirmTxId = repository.confirmSuggestedTransaction(
+            suggestedId = unmatchedId,
+            overrideAccountId = alinmaAccBefore.id
+        )
+        assertNotNull(manualConfirmTxId)
+        val alinmaAccFinal = db.dao().getAccountById(alinmaAccBefore.id)!!
+        assertEquals(alinmaAccBefore.currentBalanceMinor - 95_00L, alinmaAccFinal.currentBalanceMinor)
+    }
+
+    @Test
+    fun encryptedFullBackupAndRestore_preservesAllUserEntities() = runBlocking {
+        // إضافة التزام وهدف توفير وكلمة تجاهل وذاكرة تاجر
+        repository.addIgnoredKeyword("رسالة ترويجية")
+        repository.saveMerchantMemory("أسواق المزرعة", categoryId = 1L, accountId = 1L)
+        repository.saveSavingsGoal(
+            SavingsGoalEntity(
+                title = "صندوق الطوارئ",
+                targetAmountMinor = 10000_00L,
+                currentAmountMinor = 2500_00L,
+                currency = "SAR",
+                targetDateMillis = System.currentTimeMillis() + 86400000L * 90
+            )
+        )
+
+        val pass = "MySecretBackup#99"
+        val encryptedPayload = repository.createLocalBackupJson(pass)
+        assertTrue(encryptedPayload.contains("\"encrypted\":true"))
+
+        // مسح كافة البيانات ثم استعادتها من النسخة المشفرة
+        db.dao().wipeAllUserData()
+
+        val restoreResult = repository.restoreLocalBackupJson(encryptedPayload, pass)
+        assertTrue(restoreResult.isSuccess)
+
+        val restoredGoals = db.dao().getAllSavingsGoals()
+        assertTrue(restoredGoals.any { it.title == "صندوق الطوارئ" && it.currentAmountMinor == 2500_00L })
+
+        val restoredKeywords = db.dao().getAllIgnoredKeywords()
+        assertTrue(restoredKeywords.any { it.keyword == "رسالة ترويجية" })
+
+        val restoredMemories = db.dao().getAllMerchantMemories()
+        assertTrue(restoredMemories.any { it.merchantDisplayName == "أسواق المزرعة" })
+    }
 }
 

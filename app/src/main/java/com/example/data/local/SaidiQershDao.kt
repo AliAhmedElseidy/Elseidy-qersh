@@ -9,6 +9,7 @@ import androidx.room.Transaction
 import androidx.room.Update
 import com.example.domain.MoneyUtils
 import kotlinx.coroutines.flow.Flow
+import java.util.Calendar
 import java.util.Locale
 
 @Dao
@@ -374,6 +375,10 @@ interface SaidiQershDao {
         overrideNotes: String? = null
     ): Long? {
         val suggested = getSuggestedById(suggestedId) ?: return null
+        // عزل قاطع لعينات الاختبار (Sandbox Isolation): يمنع نهائياً تحويل أي رسالة اختبار إلى عملية مالية حقيقية أو التأثير على الأرصدة
+        if (suggested.isTestSandbox) {
+            return null
+        }
         // منع التأكيد المزدوج لنفس العملية المقترحة
         if (suggested.status == ReviewStatus.CONFIRMED || suggested.confirmedTransactionId != null) {
             return null
@@ -386,12 +391,17 @@ interface SaidiQershDao {
         val normalizedMerchant = merchant.trim().lowercase(Locale.ROOT).replace(Regex("\\s+"), " ")
         val memory = getMerchantMemoryByNormalized(normalizedMerchant)
 
+        // منع إسناد العمليات البنكية لحساب خاطئ (إلغاء الـ Fallback العشوائي):
+        // يجب أن يكون الحساب محدداً يدوياً أو مطابقاً بنسبة 100%، وإلا تظل العملية معلقة وتتطلب اختيار المستخدم للحساب
         val accounts = getAllAccounts()
-        val chosenAccountId = overrideAccountId
-            ?: suggested.suggestedAccountId
-            ?: memory?.accountId?.takeIf { memAccId -> accounts.any { it.id == memAccId } }
-            ?: accounts.firstOrNull { it.bankId == suggested.bankId }?.id
-            ?: accounts.firstOrNull()?.id
+        val chosenAccountId = overrideAccountId?.takeIf { id -> accounts.any { it.id == id } }
+            ?: suggested.suggestedAccountId?.takeIf { id -> accounts.any { it.id == id } }
+            ?: memory?.accountId?.takeIf { memAccId ->
+                accounts.any { acc ->
+                    acc.id == memAccId &&
+                        (suggested.bankId == null || acc.bankId == null || acc.bankId == suggested.bankId)
+                }
+            }
             ?: return null
 
         val txType = when (suggested.suggestedType) {
@@ -473,6 +483,9 @@ interface SaidiQershDao {
     @Query("SELECT * FROM budgets ORDER BY yearMonth DESC, id ASC")
     fun observeAllBudgets(): Flow<List<BudgetEntity>>
 
+    @Query("SELECT * FROM budgets ORDER BY yearMonth DESC, id ASC")
+    suspend fun getAllBudgets(): List<BudgetEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertBudget(budget: BudgetEntity): Long
 
@@ -482,6 +495,9 @@ interface SaidiQershDao {
     // ==================== الالتزامات والأقساط والجمعيات ====================
     @Query("SELECT * FROM obligations ORDER BY isCompleted ASC, dueDateMillis ASC")
     fun observeObligations(): Flow<List<ObligationEntity>>
+
+    @Query("SELECT * FROM obligations ORDER BY isCompleted ASC, dueDateMillis ASC")
+    suspend fun getAllObligations(): List<ObligationEntity>
 
     @Query("SELECT * FROM obligations WHERE id = :id LIMIT 1")
     suspend fun getObligationById(id: Long): ObligationEntity?
@@ -560,9 +576,18 @@ interface SaidiQershDao {
 
         val newPaid = obligation.paidAmountMinor + amountMinor
         val completed = newPaid >= obligation.totalAmountMinor
+        val nextDueDateMillis = if (obligation.isRecurring && !completed) {
+            Calendar.getInstance().apply {
+                timeInMillis = obligation.dueDateMillis
+                add(Calendar.MONTH, obligation.recurrenceMonths.coerceAtLeast(1))
+            }.timeInMillis
+        } else {
+            obligation.dueDateMillis
+        }
         updateObligation(
             obligation.copy(
                 paidAmountMinor = newPaid,
+                dueDateMillis = nextDueDateMillis,
                 isCompleted = completed
             )
         )
@@ -585,6 +610,9 @@ interface SaidiQershDao {
     @Query("SELECT * FROM savings_goals ORDER BY isCompleted ASC, targetDateMillis ASC")
     fun observeSavingsGoals(): Flow<List<SavingsGoalEntity>>
 
+    @Query("SELECT * FROM savings_goals ORDER BY isCompleted ASC, targetDateMillis ASC")
+    suspend fun getAllSavingsGoals(): List<SavingsGoalEntity>
+
     @Query("SELECT * FROM savings_goals WHERE id = :id LIMIT 1")
     suspend fun getSavingsGoalById(id: Long): SavingsGoalEntity?
 
@@ -597,8 +625,11 @@ interface SaidiQershDao {
     @Delete
     suspend fun deleteSavingsGoal(goal: SavingsGoalEntity)
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSavingsMovement(movement: SavingsMovementEntity): Long
+
+    @Query("SELECT * FROM savings_movements ORDER BY timestamp DESC")
+    suspend fun getAllSavingsMovements(): List<SavingsMovementEntity>
 
     @Transaction
     suspend fun recordSavingsMovement(goalId: Long, isDeposit: Boolean, amountMinor: Long, note: String): Boolean {
@@ -629,6 +660,9 @@ interface SaidiQershDao {
     @Query("SELECT * FROM shopping_lists ORDER BY isArchived ASC, createdAt DESC")
     fun observeShoppingLists(): Flow<List<ShoppingListEntity>>
 
+    @Query("SELECT * FROM shopping_lists ORDER BY isArchived ASC, createdAt DESC")
+    suspend fun getAllShoppingLists(): List<ShoppingListEntity>
+
     @Query("SELECT * FROM shopping_lists WHERE id = :id LIMIT 1")
     suspend fun getShoppingListById(id: Long): ShoppingListEntity?
 
@@ -643,6 +677,15 @@ interface SaidiQershDao {
 
     @Query("SELECT * FROM shopping_items ORDER BY listId DESC, id ASC")
     fun observeAllShoppingItems(): Flow<List<ShoppingItemEntity>>
+
+    @Query("SELECT * FROM shopping_items ORDER BY listId DESC, id ASC")
+    suspend fun getAllShoppingItems(): List<ShoppingItemEntity>
+
+    @Query("SELECT * FROM installment_payments ORDER BY paidAt DESC")
+    suspend fun getAllInstallmentPayments(): List<InstallmentPaymentEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertInstallmentPaymentOnRestore(payment: InstallmentPaymentEntity): Long
 
     @Query("SELECT * FROM shopping_items WHERE listId = :listId ORDER BY id ASC")
     suspend fun getShoppingItemsForList(listId: Long): List<ShoppingItemEntity>
